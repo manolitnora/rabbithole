@@ -1,0 +1,20 @@
+{
+  "name": "rabbithole",
+  "version": "1.0.0",
+  "description": "Privacy-tunneled recursive research engine for LLM agents. Brave Search + DAG traversal + jitter delays. No tracking, no cloud dependencies.",
+  "type": "module",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "test": "tsx --test tests/*.test.ts",
+    "dev": "tsx src/index.ts"
+  },
+  "keywords": ["llm", "research", "brave-search", "privacy", "mcp", "dag", "web-scraping"],
+  "license": "MIT",
+  "dependencies": {},
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0"
+  }
+}
