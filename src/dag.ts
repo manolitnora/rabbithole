@@ -18,6 +18,11 @@
 export interface ResearchNode {
   id: string;
   topic: string;
+  /** Optional override sent to Brave instead of `topic`. When the topic carries
+   *  rich grounding context for the LLM extractor, the literal context string
+   *  poisons web search; searchQuery lets the caller anchor the search in a
+   *  short focused phrase while preserving `topic` for downstream prompts. */
+  searchQuery?: string;
   parentId: string | null;
   depth: number;
   status: 'pending' | 'researching' | 'complete' | 'failed';
@@ -62,7 +67,7 @@ export function canAddNode(): boolean {
   return nodes.size < MAX_NODES;
 }
 
-export function createRootNode(topic: string): ResearchNode | null {
+export function createRootNode(topic: string, searchQuery?: string): ResearchNode | null {
   if (!canAddNode()) return null;
   const normalized = topic.toLowerCase().trim();
   if (topicIndex.has(normalized)) return null;
@@ -70,6 +75,7 @@ export function createRootNode(topic: string): ResearchNode | null {
   const node: ResearchNode = {
     id: crypto.randomUUID(),
     topic,
+    searchQuery,
     parentId: null,
     depth: 0,
     status: 'pending',

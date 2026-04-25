@@ -61,6 +61,17 @@ export interface DiveResult {
   exitReason: 'convergence' | 'max_depth' | 'max_nodes' | 'no_pending';
 }
 
+/** Per-call options that override config */
+export interface DiveOptions extends Partial<RabbitHoleConfig> {
+  /** Search query sent to Brave for the ROOT node only.
+   *  Lets callers anchor the dive in a focused phrase while keeping `topic`
+   *  rich with grounding context for the LLM sub-topic extractor. Without
+   *  this split, long context-strings poison Brave (e.g. trigger words like
+   *  "Vault" magnet to HashiCorp). Child nodes always search by their own
+   *  sub-topic phrase, so this only affects depth=0. */
+  searchQuery?: string;
+}
+
 // ═══════════════════════════════════════════════════════════════════
 // DEFAULTS
 // ═══════════════════════════════════════════════════════════════════
@@ -206,8 +217,9 @@ async function processNode(node: ResearchNode): Promise<void> {
   markResearching(node.id);
 
   try {
-    // Search for the topic
-    const searchResults = await braveSearch(node.topic, config.searchResultsPerQuery);
+    // Search for the topic. Use searchQuery override if provided (root only).
+    const query = node.searchQuery ?? node.topic;
+    const searchResults = await braveSearch(query, config.searchResultsPerQuery);
 
     if (searchResults.length === 0) {
       markFailed(node.id);
@@ -278,16 +290,18 @@ async function processNode(node: ResearchNode): Promise<void> {
  */
 export async function dive(
   topic: string,
-  options?: Partial<RabbitHoleConfig>,
+  options?: DiveOptions,
 ): Promise<DiveResult> {
-  // Apply config overrides
-  config = { ...DEFAULT_CONFIG, ...options };
+  // Apply config overrides (strip our extra keys before merging into config)
+  const { searchQuery, ...cfgOverrides } = options ?? {};
+  config = { ...DEFAULT_CONFIG, ...cfgOverrides };
   researchedTopics.clear();
   resetDAG();
   activeRequests = 0;
 
-  // Create root node
-  const root = createRootNode(topic);
+  // Create root node — searchQuery overrides what brave sees for depth=0
+  // while `topic` remains the LLM-context handle through the dive.
+  const root = searchQuery ? createRootNode(topic, searchQuery) : createRootNode(topic);
   if (!root) {
     return {
       topic,
