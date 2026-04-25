@@ -25,8 +25,8 @@ import { tunnel } from './tunnel.js';
 import {
   resetDAG, createRootNode, addChildNode, markResearching,
   updateNodeWithResults, markFailed, getPendingNodes,
-  getStats, canAddNode, exportToMarkdown, getAllNodes,
-  type ResearchNode, MAX_DEPTH, MAX_NODES,
+  getStats, canAddNode, exportToMarkdown, getAllNodes, getNode,
+  type ResearchNode, type DAGStats, MAX_DEPTH, MAX_NODES,
 } from './dag.js';
 
 // ═══════════════════════════════════════════════════════════════════
@@ -41,6 +41,14 @@ export interface RabbitHoleConfig {
   maxJitter: number;
   maxContentPerPage: number;
   searchResultsPerQuery: number;
+  /** Optional: LLM endpoint for semantic sub-topic extraction.
+   *  If set (e.g. "http://localhost:8000/v1"), uses the local model
+   *  instead of bigram frequency. Makes mitosis semantically driven. */
+  llmBaseUrl?: string;
+  /** Model ID for LLM extraction (default: full mlx-community DeepSeek-R1 path) */
+  llmModel?: string;
+  /** Called each time a node completes — enables live streaming. */
+  onNodeComplete?: (node: ResearchNode, stats: DAGStats) => void;
 }
 
 export interface DiveResult {
@@ -65,6 +73,12 @@ const DEFAULT_CONFIG: RabbitHoleConfig = {
   maxJitter: 5000,
   maxContentPerPage: 5000,
   searchResultsPerQuery: 5,
+  llmBaseUrl: undefined,
+  // Llama-3.2-3B is non-thinking and reliably returns JSON in <120 tokens.
+  // R1 and Qwen3.5 both have reasoning chains that blow the token budget
+  // and fall through to bigram. Llama is the right tool for sub-topic extraction.
+  llmModel: 'mlx-community/Llama-3.2-3B-Instruct-4bit',
+  onNodeComplete: undefined,
 };
 
 // ═══════════════════════════════════════════════════════════════════
@@ -90,6 +104,57 @@ function sleep(ms: number): Promise<void> {
 // ═══════════════════════════════════════════════════════════════════
 // SUB-TOPIC EXTRACTION
 // ═══════════════════════════════════════════════════════════════════
+
+/**
+ * LLM-guided sub-topic extraction.
+ * Calls the local model (rapid-mlx at localhost:8000) to read the page
+ * and return semantically meaningful next research branches.
+ * Falls back to bigram heuristic if the LLM is unavailable.
+ */
+async function extractSubTopicsLLM(
+  content: string,
+  parentTopic: string,
+  limit = 3,
+): Promise<string[]> {
+  if (!config.llmBaseUrl) return extractSubTopics(content, parentTopic, limit);
+
+  const prompt = [
+    `You are a research navigator. Given a page about "${parentTopic}", identify exactly ${limit} specific sub-topics worth exploring next.`,
+    `Rules: each sub-topic must be 2-5 words, concrete and distinct, not already covered by "${parentTopic}".`,
+    `Return ONLY a JSON array of strings. No explanation. Example: ["memory consolidation", "replay buffers", "episodic encoding"]`,
+    ``,
+    `Page content (first 1500 chars):`,
+    content.slice(0, 1500),
+  ].join('\n');
+
+  try {
+    const res = await fetch(`${config.llmBaseUrl}/chat/completions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer not-needed' },
+      body: JSON.stringify({
+        model: config.llmModel ?? "mlx-community/DeepSeek-R1-0528-Qwen3-8B-4bit",
+        messages: [{ role: 'user', content: prompt }],
+        max_tokens: 120,
+        temperature: 0.3,
+      }),
+      signal: AbortSignal.timeout(8000),
+    });
+    if (!res.ok) throw new Error(`LLM ${res.status}`);
+    const data = await res.json() as { choices?: Array<{ message?: { content?: string } }> };
+    const raw = data.choices?.[0]?.message?.content ?? '';
+    // Extract JSON array from response (may have thinking tokens around it)
+    const match = raw.match(/\[([^\]]+)\]/);
+    if (!match) throw new Error('no array in response');
+    const topics = JSON.parse(`[${match[1]}]`) as string[];
+    return topics
+      .map((t: string) => t.trim().toLowerCase())
+      .filter((t: string) => t.length > 3 && !researchedTopics.has(t))
+      .slice(0, limit);
+  } catch {
+    // LLM unavailable or malformed — fall back to bigram
+    return extractSubTopics(content, parentTopic, limit);
+  }
+}
 
 /**
  * Extract sub-topics from content using keyword frequency heuristic.
@@ -172,12 +237,18 @@ async function processNode(node: ResearchNode): Promise<void> {
 
     const combinedContent = contents.join('\n\n');
 
-    // Extract sub-topics for deeper research
-    const subTopics = extractSubTopics(combinedContent, node.topic);
+    // Extract sub-topics — LLM-guided if available, bigram fallback
+    const subTopics = await extractSubTopicsLLM(combinedContent, node.topic);
 
     // Update node
     updateNodeWithResults(node.id, combinedContent.substring(0, 5000), sources, subTopics);
     researchedTopics.add(node.topic.toLowerCase());
+
+    // Fire live streaming callback
+    const completedNode = getNode(node.id);
+    if (completedNode && config.onNodeComplete) {
+      config.onNodeComplete(completedNode, getStats());
+    }
 
     // Mitosis: spawn child nodes
     if (subTopics.length > 0 && canAddNode()) {
