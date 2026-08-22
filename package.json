@@ -9,9 +9,19 @@
     "test": "tsx --test tests/*.test.ts",
     "dev": "tsx src/index.ts"
   },
-  "keywords": ["llm", "research", "brave-search", "privacy", "mcp", "dag", "web-scraping"],
+  "keywords": [
+    "llm",
+    "research",
+    "brave-search",
+    "privacy",
+    "mcp",
+    "dag",
+    "web-scraping"
+  ],
   "license": "MIT",
-  "dependencies": {},
+  "dependencies": {
+    "linkedom": "^0.18.13"
+  },
   "devDependencies": {
     "@types/node": "^22.0.0",
     "tsx": "^4.19.0",
