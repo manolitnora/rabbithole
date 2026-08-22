@@ -142,6 +142,31 @@ describe('dive — compounding semantics', () => {
     store2.close();
   });
 
+  test('multi-source node unchanged → NOT flagged changed (probe-to-probe)', async () => {
+    // Regression: live Wikipedia runs flagged every node changed because
+    // staleness compared the COMBINED node hash against a single-page
+    // refetch. The probe hash must cover source[0] alone.
+    const storePath = tempStorePath();
+    const twoResultSearch: EngineDeps = {
+      search: async (query: string) => [
+        { title: 'a', url: `https://site.test/p-${slug(query)}-a`, description: 'a' },
+        { title: 'b', url: `https://site.test/p-${slug(query)}-b`, description: 'b' },
+      ],
+      fetchPage: async (url, recipe) => {
+        const key = url.slice('https://site.test/p-'.length);
+        const base = key.replace(/-[ab]$/, '');
+        const content = `${base} source text ${key.endsWith('-a') ? 'alpha variant' : 'beta variant'} `.repeat(30);
+        return okResult(url, content);
+      },
+    };
+
+    await dive('topic multi', { storePath, maxNodes: 3 }, twoResultSearch);
+    const run2 = await dive('topic multi', { storePath, resume: true, stalenessTtlMs: 0 }, twoResultSearch);
+    assert.equal(run2.delta!.revalidated >= 1, true);
+    assert.equal(run2.delta!.changedNodes, 0, 'stable two-source nodes must not be flagged changed');
+  });
+
+
   test('unchanged stale page is touched, not requeued', async () => {
     const storePath = tempStorePath();
     const pages = new Map<string, () => string>();

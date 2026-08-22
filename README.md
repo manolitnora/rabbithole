@@ -101,8 +101,9 @@ Get a key at [brave.com/search/api](https://brave.com/search/api/). Free tier: 2
 ## Test
 
 ```bash
-npm test   # 41 tests — DAG, store, extract, tunnel config, engine (no network calls)
-npx tsx smoke.mts   # live 2-run web smoke (requires BRAVE_API_KEY)
+npm test   # 43 tests — DAG, store, extract, tunnel config, engine (no network calls)
+npx tsx live-test.mts   # live integration: full compounding dive ×2 via keyless Wikipedia search
+npx tsx smoke.mts   # live 2-run web smoke via Brave (requires BRAVE_API_KEY)
 ```
 
 ## Constraints

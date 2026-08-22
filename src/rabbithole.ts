@@ -175,7 +175,7 @@ async function processNode(node: ResearchNode, ctx: NodeContext): Promise<void> 
 
   // Persist this node's durable state. Topic is the key; created_at is
   // preserved across overwrites by the store's conflict rule.
-  const flush = (status: StoredNode['status'], fetchError: string | null): void => {
+  const flush = (status: StoredNode['status'], fetchError: string | null, probeHash?: string | null): void => {
     const parent = node.parentId ? getNode(node.parentId) : null;
     const now = Date.now();
     store.upsertNode({
@@ -185,6 +185,7 @@ async function processNode(node: ResearchNode, ctx: NodeContext): Promise<void> 
       depth: node.depth,
       status,
       contentHash: node.content ? sha256(node.content) : null,
+      probeHash: probeHash ?? null,
       content: node.content || null,
       sources: node.sources,
       subtopics: node.subTopics,
@@ -194,6 +195,10 @@ async function processNode(node: ResearchNode, ctx: NodeContext): Promise<void> 
     });
   };
 
+  // Probe = first successful source's extracted text. Its hash (not the
+  // combined node hash) is what staleness revalidation compares against.
+  let probeContent: string | null = null;
+
   try {
     // Search for the topic
     const searchResults = await deps.search(node.topic, cfg.searchResultsPerQuery);
@@ -202,7 +207,6 @@ async function processNode(node: ResearchNode, ctx: NodeContext): Promise<void> 
       markFailed(node.id);
       delta.failedNodes++;
       flush('failed', 'search returned no results');
-      return;
     }
 
     // Tunnel into top results and extract content (recipes per domain)
@@ -217,6 +221,7 @@ async function processNode(node: ResearchNode, ctx: NodeContext): Promise<void> 
       const res = await deps.fetchPage(result.url, recipe);
 
       if (res.success) {
+        if (probeContent === null) probeContent = res.content;
         contents.push(res.content.substring(0, cfg.maxContentPerPage));
         sources.push(result.url);
         if (domain) {
@@ -276,9 +281,16 @@ async function processNode(node: ResearchNode, ctx: NodeContext): Promise<void> 
     // PENDING immediately — an unprocessed frontier must survive the run
     // (and reserve its topic against other roots) even if this run exits
     // before reaching it.
-    if (subTopics.length > 0 && canAddNode()) {
+    if (subTopics.length > 0 && canAddNode() && getStats().totalNodes < cfg.maxNodes) {
       for (const sub of subTopics) {
-        if (canAddNode() && !researchedTopics.has(normalizeTopic(sub))) {
+        // cfg.maxNodes / cfg.maxDepth gate SPAWNING here — dag's MAX_NODES /
+        // MAX_DEPTH are hard backstops; the configured budget is authoritative.
+        if (
+          canAddNode()
+          && getStats().totalNodes < cfg.maxNodes
+          && node.depth + 1 <= cfg.maxDepth
+          && !researchedTopics.has(normalizeTopic(sub))
+        ) {
           const child = addChildNode(node.id, sub);
           if (child) {
             researchedTopics.add(normalizeTopic(sub));
@@ -291,6 +303,7 @@ async function processNode(node: ResearchNode, ctx: NodeContext): Promise<void> 
               depth: child.depth,
               status: 'pending',
               contentHash: null,
+              probeHash: null,
               content: null,
               sources: [],
               subtopics: [],
@@ -303,7 +316,7 @@ async function processNode(node: ResearchNode, ctx: NodeContext): Promise<void> 
       }
     }
 
-    flush('complete', fetchError);
+    flush('complete', fetchError, probeContent ? sha256(probeContent.substring(0, cfg.maxContentPerPage)) : null);
   } catch (err) {
     markFailed(node.id);
     delta.failedNodes++;
@@ -440,8 +453,11 @@ export async function dive(
         const res = await fetchPage(sourceUrl, recipe);
         if (!res.success) continue; // unreachable this run — leave as-is
 
-        const newHash = sha256(res.content.substring(0, cfg.maxContentPerPage));
-        if (row.contentHash && newHash !== row.contentHash) {
+        // Probe-to-probe: the stored hash is of source[0]'s extracted
+        // content alone (NOT the combined multi-source node content,
+        // which can never match a single-page refetch).
+        const newProbe = sha256(res.content.substring(0, cfg.maxContentPerPage));
+        if (row.probeHash && newProbe !== row.probeHash) {
           requeueNode(dagId); // changed page → re-research this node
           requeuedIds.push(dagId);
           delta.changedNodes++;
@@ -466,6 +482,7 @@ export async function dive(
         depth: 0,
         status: 'pending',
         contentHash: null,
+        probeHash: null,
         content: null,
         sources: [],
         subtopics: [],
@@ -480,6 +497,10 @@ export async function dive(
     let iterations = 0;
     let exitReason: DiveResult['exitReason'] = 'convergence';
 
+    // Drain the pending frontier. Capacity is enforced at SPAWN time
+    // (mitosis gates on cfg.maxNodes / cfg.maxDepth), so existing pending
+    // nodes are always processed — a full DAG must not strand its own
+    // frontier. Exit reason reflects why the frontier stopped growing.
     while (iterations < cfg.maxNodes) {
       const pending = getPendingNodes();
 
@@ -488,21 +509,16 @@ export async function dive(
         break;
       }
 
-      const stats = getStats();
-      if (stats.totalNodes >= cfg.maxNodes) {
-        exitReason = 'max_nodes';
-        break;
-      }
-      if (stats.maxDepth >= cfg.maxDepth) {
-        exitReason = 'max_depth';
-        break;
-      }
-
       // Process next batch — concurrency lives inside tunnel now
       const batch = pending.slice(0, cfg.maxConcurrent);
       await Promise.all(batch.map(node => processNode(node, ctx)));
 
       iterations++;
+    }
+
+    if (getPendingNodes().length > 0) {
+      const stats = getStats();
+      exitReason = stats.maxDepth >= cfg.maxDepth ? 'max_depth' : 'max_nodes';
     }
 
     delta.expandedNodes = ctx.expandedCount.n;

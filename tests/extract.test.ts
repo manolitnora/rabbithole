@@ -70,7 +70,25 @@ describe('extractGeneric', () => {
     assert.equal(ex.content, '');
     assert.deepEqual(ex.links, []);
   });
+
+  test('sectioned layout: sibling sections merge into one extraction', () => {
+    // Regression: MediaWiki now splits articles into sibling <section>s;
+    // picking only the densest section lost ~95% of the article.
+    const sectioned = pageWith(`
+    <div id="mw-content">
+      <h1>Title</h1>
+      <section id="mwQ"><p>Lead. ${PROSE}</p></section>
+      <section id="mwR"><p>History. ${PROSE.replace(/Episodic/g, 'Historic')}</p></section>
+      <section id="mwS"><p>Practice. ${PROSE.replace(/Episodic/g, 'Practical')}</p></section>
+      <nav><a href="/x">nav</a></nav>
+    </div>`);
+    const ex = extractGeneric(sectioned);
+    assert.ok(ex.yieldChars >= PROSE.length * 2, `expected merged sections, got ${ex.yieldChars} chars`);
+    assert.ok(ex.content.includes('Lead.') && ex.content.includes('History.') && ex.content.includes('Practice.'), 'all sections present');
+    assert.equal(ex.selector, 'div#mw-content');
+  });
 });
+
 describe('selectorFor', () => {
   test('prefers id, then first class, then bare tag', () => {
     assert.equal(selectorFor({ tagName: 'ARTICLE', getAttribute: (k: string) => (k === 'id' ? 'x' : null) } as never), 'article#x');

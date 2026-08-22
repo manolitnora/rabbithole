@@ -103,25 +103,57 @@ export function selectorFor(el: Element): string | null {
 }
 
 /**
- * Pick the densest prose container. A candidate wins only if its
- * text-density beats the whole-body density (prose vs chrome) and it
- * holds meaningful text.
+ * Pick the densest prose container, then widen upward: fragmented layouts
+ * (e.g. MediaWiki's per-section <section> split) hide most prose in
+ * siblings of the densest candidate. The highest ancestor whose density
+ * stays within 70% of the winner's captures the whole group while still
+ * excluding nav-heavy wrappers.
  */
 export function pickContainer(root: Element): { el: Element; selector: string | null } | null {
   const bodyStats = textStats(root);
   if (bodyStats.textLen === 0) return null;
   const bodyScore = bodyStats.textLen / (1 + bodyStats.linkTextLen);
 
-  let best: { el: Element; score: number } | null = null;
+  let best: { el: Element; score: number; stats: { textLen: number; linkTextLen: number } } | null = null;
   for (const el of root.querySelectorAll(CANDIDATE_TAGS)) {
     if ((el as unknown as { tagName?: string }).tagName === 'BODY') continue;
     const s = textStats(el);
     if (s.textLen < 200) continue;
     const score = s.textLen / (1 + s.linkTextLen);
-    if (!best || score > best.score) best = { el, score };
+    if (!best || score > best.score) best = { el, score, stats: s };
   }
 
-  if (best && best.score > bodyScore) {
+  if (!best) return null;
+
+  // Widen upward through ancestors that add real prose without being
+  // MORE link-diluted than the body itself (relative-to-candidate
+  // thresholds never climb: e.g. Wikipedia sections score ~13 vs
+  // wrapper chains at ~3, all equally non-chrome relative to body).
+  let chosen = best.el;
+  let chosenTextLen = best.stats.textLen;
+  let cur = best.el.parentElement;
+  while (cur && cur !== root && (cur as unknown as { tagName?: string }).tagName !== 'BODY') {
+    const s = textStats(cur);
+    const density = s.textLen / (1 + s.linkTextLen);
+    if (s.textLen > chosenTextLen && density >= bodyScore) {
+      chosen = cur;
+      chosenTextLen = s.textLen;
+      cur = cur.parentElement;
+    } else {
+      break;
+    }
+  }
+
+  if (chosenTextLen > best.stats.textLen) {
+    return { el: chosen, selector: selectorFor(chosen) };
+  }
+
+  // Accept the winner when it genuinely out-densifies the body, OR when
+  // it simply holds most of the body's prose at comparable density —
+  // wrappers that contain the whole article tie the body's score without
+  // being chrome.
+  const holdsMostProse = best.stats.textLen >= 0.5 * bodyStats.textLen;
+  if (best.score > bodyScore || (holdsMostProse && best.score >= 0.7 * bodyScore)) {
     return { el: best.el, selector: selectorFor(best.el) };
   }
   return null;

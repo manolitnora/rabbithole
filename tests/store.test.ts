@@ -28,6 +28,7 @@ function makeNode(overrides: Partial<StoredNode> = {}): StoredNode {
     status: 'pending',
     depth: 0,
     contentHash: null,
+    probeHash: null,
     content: null,
     sources: [],
     subtopics: [],

@@ -28,6 +28,13 @@ export interface StoredNode {
   status: NodeStatus;
   depth: number;
   contentHash: string | null;
+  /**
+   * Hash of the FIRST source's extracted content at research time — the
+   * staleness probe. Comparing probe-to-probe keeps revalidation honest
+   * for multi-source nodes (content_hash covers combined content and can
+   * never match a single-page refetch).
+   */
+  probeHash: string | null;
   content: string | null;
   sources: string[];
   subtopics: string[];
@@ -78,6 +85,7 @@ CREATE TABLE IF NOT EXISTS nodes (
   status TEXT NOT NULL DEFAULT 'pending',
   depth INTEGER NOT NULL DEFAULT 0,
   content_hash TEXT,
+  probe_hash TEXT,
   content TEXT,
   sources TEXT NOT NULL DEFAULT '[]',
   subtopics TEXT NOT NULL DEFAULT '[]',
@@ -119,12 +127,18 @@ export class Store {
     this.db = new DatabaseSync(dbPath);
     this.db.exec('PRAGMA journal_mode = WAL;');
     this.db.exec(SCHEMA);
+    // Pre-probe_hash databases: add the column. Duplicate-column error on
+    // fresh DBs is expected and ignored.
+    try {
+      this.db.exec('ALTER TABLE nodes ADD COLUMN probe_hash TEXT');
+    } catch { /* already exists */ }
   }
 
   close(): void {
     this.db.close();
   }
 
+  // ── Nodes ────────────────────────────────────────────────────────
 
   upsertNode(n: StoredNode): void {
     const topic = normalizeTopic(n.topic);
@@ -132,18 +146,19 @@ export class Store {
     const parentTopic = n.parentTopic === null ? null : normalizeTopic(n.parentTopic);
     this.db.prepare(`
       INSERT INTO nodes (topic, root_topic, parent_topic, status, depth,
-                         content_hash, content, sources, subtopics,
+                         content_hash, probe_hash, content, sources, subtopics,
                          fetch_error, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(topic) DO UPDATE SET
         root_topic=excluded.root_topic, parent_topic=excluded.parent_topic,
         status=excluded.status, depth=excluded.depth,
-        content_hash=excluded.content_hash, content=excluded.content,
+        content_hash=excluded.content_hash, probe_hash=excluded.probe_hash,
+        content=excluded.content,
         sources=excluded.sources, subtopics=excluded.subtopics,
         fetch_error=excluded.fetch_error, updated_at=excluded.updated_at
     `).run(
       topic, rootTopic, parentTopic, n.status, n.depth,
-      n.contentHash, n.content, JSON.stringify(n.sources),
+      n.contentHash, n.probeHash, n.content, JSON.stringify(n.sources),
       JSON.stringify(n.subtopics), n.fetchError, n.createdAt, n.updatedAt,
     );
   }
@@ -242,6 +257,7 @@ function rowToNode(row: Record<string, unknown>): StoredNode {
     status: row.status as NodeStatus,
     depth: row.depth as number,
     contentHash: (row.content_hash as string) ?? null,
+    probeHash: (row.probe_hash as string) ?? null,
     content: (row.content as string) ?? null,
     sources: JSON.parse((row.sources as string) ?? '[]') as string[],
     subtopics: JSON.parse((row.subtopics as string) ?? '[]') as string[],
