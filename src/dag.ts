@@ -137,6 +137,12 @@ export function markFailed(id: string): void {
   if (node) node.status = 'failed';
 }
 
+/** Flip a complete/failed node back to pending (staleness invalidation). */
+export function requeueNode(id: string): void {
+  const node = nodes.get(id);
+  if (node) node.status = 'pending';
+}
+
 export function getPendingNodes(): ResearchNode[] {
   return Array.from(nodes.values()).filter(n => n.status === 'pending');
 }

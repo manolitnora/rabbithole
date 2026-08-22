@@ -3,3 +3,7 @@ dist/
 *.tsbuildinfo
 .DS_Store
 .env
+
+# rabbithole state
+.rabbithole/
+.rabbithole-smoke/

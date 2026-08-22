@@ -43,39 +43,46 @@ export async function braveSearch(
     return [];
   }
 
-  try {
-    const params = new URLSearchParams({
-      q: query,
-      count: String(Math.min(count, 20)),
-      text_decorations: 'false',
-      search_lang: 'en',
-      safesearch: 'moderate',
-    });
+  const params = new URLSearchParams({
+    q: query,
+    count: String(Math.min(count, 20)),
+    text_decorations: 'false',
+    search_lang: 'en',
+    safesearch: 'moderate',
+  });
 
-    const response = await fetch(`${BASE_URL}?${params.toString()}`, {
-      headers: {
-        'Accept': 'application/json',
-        'Accept-Encoding': 'gzip',
-        'X-Subscription-Token': key,
-      },
-    });
+  // One retry on transient failures (429 rate-limit / 5xx / network),
+  // mirroring tunnel.ts. Brave free tier allows ~1 req/s.
+  for (let attempt = 0; attempt <= 1; attempt++) {
+    try {
+      if (attempt > 0) await new Promise(r => setTimeout(r, 1100));
 
-    if (!response.ok) {
-      console.error(`[rabbithole] Brave search failed: ${response.status}`);
-      return [];
+      const response = await fetch(`${BASE_URL}?${params.toString()}`, {
+        headers: {
+          'Accept': 'application/json',
+          'Accept-Encoding': 'gzip',
+          'X-Subscription-Token': key,
+        },
+      });
+
+      if (!response.ok) {
+        console.error(`[rabbithole] Brave search failed: ${response.status}`);
+        if (response.status === 429 || response.status >= 500) continue;
+        return [];
+      }
+
+      const data = await response.json() as {
+        web?: { results?: Array<{ title?: string; url?: string; description?: string }> };
+      };
+
+      return (data.web?.results ?? []).map(r => ({
+        title: r.title ?? '',
+        url: r.url ?? '',
+        description: r.description ?? '',
+      }));
+    } catch (err) {
+      console.error('[rabbithole] Brave search error:', err instanceof Error ? err.message : String(err));
     }
-
-    const data = await response.json() as {
-      web?: { results?: Array<{ title?: string; url?: string; description?: string }> };
-    };
-
-    return (data.web?.results ?? []).map(r => ({
-      title: r.title ?? '',
-      url: r.url ?? '',
-      description: r.description ?? '',
-    }));
-  } catch (err) {
-    console.error('[rabbithole] Brave search error:', err instanceof Error ? err.message : String(err));
-    return [];
   }
+  return [];
 }

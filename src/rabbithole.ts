@@ -1,33 +1,47 @@
 /**
- * Rabbit Hole Engine — Recursive, self-expanding research.
+ * Rabbit Hole Engine — Recursive, self-expanding, COMPOUNDING research.
  *
  * Algorithm:
  *   1. Ignition: topic provided
  *   2. Search: Brave Search finds relevant pages
- *   3. Tunnel: fetch content with jitter + privacy
- *   4. Extract: pull sub-topics from content
+ *   3. Tunnel: fetch content with jitter + privacy + per-domain recipes
+ *   4. Extract: pull sub-topics from content (deterministic bigrams)
  *   5. Mitosis: spawn child nodes for sub-topics
  *   6. Repeat until MAX_DEPTH, MAX_NODES, or convergence
+ *   7. Persist: every node lands in SQLite; the next dive resumes
+ *
+ * Compounding semantics (the point of v2):
+ *   - Topics are durable keys: a topic researched in ANY run is never
+ *     re-explored unless invalidated.
+ *   - resume=true reloads the stored DAG; complete nodes are skipped;
+ *     nodes older than stalenessTtlMs get revalidated (content-hash compare,
+ *     capped at maxRevalidate per run); changed pages re-enter processing.
+ *   - The second dive on the same topic reports a delta instead of redoing work.
  *
  * Constraints:
  *   MAX_DEPTH:      3  (prevent infinite recursion)
  *   MAX_NODES:      20 (prevent explosion)
- *   MAX_CONCURRENT: 3  (prevent rate-limiting)
+ *   MAX_CONCURRENT: 3  (enforced SOLELY by tunnel — engine keeps no counter)
  *   JITTER:         2-5s (anti-bot behavior)
  *
- * Ported from HybridEngineV3/src/lib/cognition/rabbitHole.ts
- * Stripped of Supabase, CognitiveEventBus, DirichletGate.
- * Pure Node.js — search, fetch, build DAG, return markdown.
+ * Zero LLM calls anywhere in this file.
  */
 
+import { createHash } from 'node:crypto';
+
 import { braveSearch, type SearchResult } from './brave.js';
-import { tunnel } from './tunnel.js';
+import { tunnel, configureTunnel, type TunnelResult } from './tunnel.js';
+import { domainOf, nextRecipe, type RecipeLike } from './extract.js';
 import {
   resetDAG, createRootNode, addChildNode, markResearching,
-  updateNodeWithResults, markFailed, getPendingNodes,
-  getStats, canAddNode, exportToMarkdown, getAllNodes,
+  updateNodeWithResults, markFailed, requeueNode, getPendingNodes,
+  getStats, canAddNode, exportToMarkdown, getAllNodes, getNode,
   type ResearchNode, MAX_DEPTH, MAX_NODES,
 } from './dag.js';
+import {
+  Store, defaultStorePath, normalizeTopic,
+  type RunDelta, type StoredNode,
+} from './store.js';
 
 // ═══════════════════════════════════════════════════════════════════
 // TYPES
@@ -41,6 +55,14 @@ export interface RabbitHoleConfig {
   maxJitter: number;
   maxContentPerPage: number;
   searchResultsPerQuery: number;
+  /** Reload persisted DAG and only explore frontier/stale nodes. */
+  resume: boolean;
+  /** Complete nodes older than this become revalidation candidates. */
+  stalenessTtlMs: number;
+  /** Max refetch-based revalidations per run (bounds cost). */
+  maxRevalidate: number;
+  /** SQLite path; null → defaultStorePath(). */
+  storePath: string | null;
 }
 
 export interface DiveResult {
@@ -51,6 +73,13 @@ export interface DiveResult {
   markdown: string;
   nodes: ResearchNode[];
   exitReason: 'convergence' | 'max_depth' | 'max_nodes' | 'no_pending';
+  delta: RunDelta | null;
+}
+
+/** Injection seam for tests — defaults hit the real network. */
+export interface EngineDeps {
+  search?: (query: string, count: number) => Promise<SearchResult[]>;
+  fetchPage?: (url: string, recipe: RecipeLike | null) => Promise<TunnelResult>;
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -65,36 +94,32 @@ const DEFAULT_CONFIG: RabbitHoleConfig = {
   maxJitter: 5000,
   maxContentPerPage: 5000,
   searchResultsPerQuery: 5,
+  resume: false,
+  stalenessTtlMs: 7 * 24 * 3600_000,
+  maxRevalidate: 5,
+  storePath: null,
 };
 
 // ═══════════════════════════════════════════════════════════════════
-// STATE
+// STATE — module-global working set; one dive at a time by design
 // ═══════════════════════════════════════════════════════════════════
 
-let config: RabbitHoleConfig = { ...DEFAULT_CONFIG };
-let activeRequests = 0;
 const researchedTopics = new Set<string>();
 
-// ═══════════════════════════════════════════════════════════════════
-// JITTER
-// ═══════════════════════════════════════════════════════════════════
-
-function jitterMs(): number {
-  return Math.floor(Math.random() * (config.maxJitter - config.minJitter)) + config.minJitter;
-}
-
 function sleep(ms: number): Promise<void> {
-  return new Promise(resolve => setTimeout(resolve, ms));
+  const { promise, resolve } = Promise.withResolvers<void>();
+  setTimeout(resolve, ms);
+  return promise;
+}
+
+function sha256(s: string): string {
+  return createHash('sha256').update(s).digest('hex');
 }
 
 // ═══════════════════════════════════════════════════════════════════
-// SUB-TOPIC EXTRACTION
+// SUB-TOPIC EXTRACTION — deterministic bigram heuristic (unchanged)
 // ═══════════════════════════════════════════════════════════════════
 
-/**
- * Extract sub-topics from content using keyword frequency heuristic.
- * Not AI-powered — uses term frequency to find candidate topics.
- */
 function extractSubTopics(content: string, parentTopic: string, limit = 3): string[] {
   const stopwords = new Set([
     'the', 'a', 'an', 'is', 'are', 'was', 'were', 'be', 'been', 'being',
@@ -134,32 +159,99 @@ function extractSubTopics(content: string, parentTopic: string, limit = 3): stri
 // NODE PROCESSING
 // ═══════════════════════════════════════════════════════════════════
 
-async function processNode(node: ResearchNode): Promise<void> {
-  if (activeRequests >= config.maxConcurrent) return;
+interface NodeContext {
+  cfg: RabbitHoleConfig;
+  store: Store;
+  deps: { search: (query: string, count: number) => Promise<SearchResult[]>; fetchPage: (url: string, recipe: RecipeLike | null) => Promise<TunnelResult> };
+  delta: RunDelta;
+  expandedCount: { n: number };
+  rootTopicN: string;
+}
 
-  activeRequests++;
+async function processNode(node: ResearchNode, ctx: NodeContext): Promise<void> {
+  const { cfg, store, deps, delta, rootTopicN } = ctx;
+
   markResearching(node.id);
+
+  // Persist this node's durable state. Topic is the key; created_at is
+  // preserved across overwrites by the store's conflict rule.
+  const flush = (status: StoredNode['status'], fetchError: string | null): void => {
+    const parent = node.parentId ? getNode(node.parentId) : null;
+    const now = Date.now();
+    store.upsertNode({
+      topic: normalizeTopic(node.topic),
+      rootTopic: rootTopicN,
+      parentTopic: parent ? normalizeTopic(parent.topic) : null,
+      depth: node.depth,
+      status,
+      contentHash: node.content ? sha256(node.content) : null,
+      content: node.content || null,
+      sources: node.sources,
+      subtopics: node.subTopics,
+      fetchError,
+      createdAt: now,
+      updatedAt: now,
+    });
+  };
 
   try {
     // Search for the topic
-    const searchResults = await braveSearch(node.topic, config.searchResultsPerQuery);
+    const searchResults = await deps.search(node.topic, cfg.searchResultsPerQuery);
 
     if (searchResults.length === 0) {
       markFailed(node.id);
+      delta.failedNodes++;
+      flush('failed', 'search returned no results');
       return;
     }
 
-    // Tunnel into top results and extract content
+    // Tunnel into top results and extract content (recipes per domain)
     const contents: string[] = [];
     const sources: string[] = [];
+    const errors: string[] = [];
+    const recipeOutcomes = new Map<string, { prev: RecipeLike | null; usedRecipe: boolean; recipeYield: number; genericYield: number; genericSelector: string | null }>();
 
     for (const result of searchResults.slice(0, 3)) {
-      const tunnelResult = await tunnel(result.url);
-      if (tunnelResult.success) {
-        contents.push(tunnelResult.content.substring(0, config.maxContentPerPage));
+      const domain = domainOf(result.url);
+      const recipe = domain ? store.getRecipe(domain) : null;
+      const res = await deps.fetchPage(result.url, recipe);
+
+      if (res.success) {
+        contents.push(res.content.substring(0, cfg.maxContentPerPage));
         sources.push(result.url);
+        if (domain) {
+          recipeOutcomes.set(domain, {
+            prev: recipe,
+            usedRecipe: res.usedRecipe,
+            recipeYield: res.usedRecipe ? res.yieldChars : 0,
+            genericYield: res.usedRecipe ? 0 : res.yieldChars,
+            genericSelector: res.usedRecipe ? null : res.selector,
+          });
+        }
+      } else {
+        errors.push(`${result.url}: ${res.error ?? 'unknown error'}`);
       }
     }
+
+    // Persist recipe learning for every domain touched this node
+    for (const [domain, oc] of recipeOutcomes) {
+      const next = nextRecipe(domain, oc.prev, {
+        usedRecipe: oc.usedRecipe,
+        recipeYield: oc.recipeYield,
+        genericYield: oc.genericYield,
+        genericSelector: oc.genericSelector,
+      });
+      store.saveRecipe({
+        domain,
+        selector: next.selector,
+        yieldChars: next.yieldChars,
+        fallbackStreak: next.fallbackStreak,
+        wins: next.wins,
+        updatedAt: Date.now(),
+      });
+    }
+
+    const fetchError: string | null = errors.length > 0 ? errors.join('; ') : null;
 
     if (contents.length === 0) {
       // Fall back to search descriptions as content
@@ -171,27 +263,86 @@ async function processNode(node: ResearchNode): Promise<void> {
     }
 
     const combinedContent = contents.join('\n\n');
+    const storedContent = combinedContent.substring(0, cfg.maxContentPerPage);
 
     // Extract sub-topics for deeper research
     const subTopics = extractSubTopics(combinedContent, node.topic);
 
-    // Update node
-    updateNodeWithResults(node.id, combinedContent.substring(0, 5000), sources, subTopics);
-    researchedTopics.add(node.topic.toLowerCase());
+    // Update in-memory DAG
+    updateNodeWithResults(node.id, storedContent, sources, subTopics);
+    researchedTopics.add(normalizeTopic(node.topic));
 
-    // Mitosis: spawn child nodes
+    // Mitosis: spawn child nodes. Each child is flushed to the store AS
+    // PENDING immediately — an unprocessed frontier must survive the run
+    // (and reserve its topic against other roots) even if this run exits
+    // before reaching it.
     if (subTopics.length > 0 && canAddNode()) {
       for (const sub of subTopics) {
-        if (canAddNode() && !researchedTopics.has(sub.toLowerCase())) {
-          addChildNode(node.id, sub);
+        if (canAddNode() && !researchedTopics.has(normalizeTopic(sub))) {
+          const child = addChildNode(node.id, sub);
+          if (child) {
+            researchedTopics.add(normalizeTopic(sub));
+            ctx.expandedCount.n++;
+            const now = Date.now();
+            store.upsertNode({
+              topic: normalizeTopic(child.topic),
+              rootTopic: rootTopicN,
+              parentTopic: normalizeTopic(node.topic),
+              depth: child.depth,
+              status: 'pending',
+              contentHash: null,
+              content: null,
+              sources: [],
+              subtopics: [],
+              fetchError: null,
+              createdAt: now,
+              updatedAt: now,
+            });
+          }
         }
       }
     }
+
+    flush('complete', fetchError);
   } catch (err) {
     markFailed(node.id);
-  } finally {
-    activeRequests--;
+    delta.failedNodes++;
+    flush('failed', err instanceof Error ? err.message : String(err));
   }
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// DAG REBUILD FROM STORE
+// ═══════════════════════════════════════════════════════════════════
+
+function rebuildDagFromStore(rows: StoredNode[]): Map<string, string> {
+  const idByTopic = new Map<string, string>();
+  for (const row of rows) {
+    let nodeId: string;
+    if (row.depth === 0) {
+      const rootNode = createRootNode(row.topic);
+      if (!rootNode) continue;
+      nodeId = rootNode.id;
+    } else {
+      const parentId = row.parentTopic ? idByTopic.get(row.parentTopic) : undefined;
+      if (!parentId) continue; // orphaned edge — skip
+      const child = addChildNode(parentId, row.topic);
+      if (!child) continue;
+      nodeId = child.id;
+    }
+    idByTopic.set(normalizeTopic(row.topic), nodeId);
+    switch (row.status) {
+      case 'complete':
+        updateNodeWithResults(nodeId, row.content ?? '', row.sources, row.subtopics);
+        break;
+      case 'failed':
+        markFailed(nodeId);
+        break;
+      default:
+        break; // pending / interrupted researching → retry as pending
+    }
+  }
+  return idByTopic;
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -199,84 +350,189 @@ async function processNode(node: ResearchNode): Promise<void> {
 // ═══════════════════════════════════════════════════════════════════
 
 /**
- * Dive into a topic. Recursive, self-expanding research.
+ * Dive into a topic. Recursive, self-expanding, resumable research.
  *
- * @param topic The starting topic
- * @param options Override default config
- * @returns Research results as DAG + markdown
+ * @param topic Root research topic
+ * @param options Config overrides (resume: true → incremental run)
+ * @param deps Optional injection seams for tests
  */
 export async function dive(
   topic: string,
   options?: Partial<RabbitHoleConfig>,
+  deps?: EngineDeps,
 ): Promise<DiveResult> {
-  // Apply config overrides
-  config = { ...DEFAULT_CONFIG, ...options };
+  const cfg: RabbitHoleConfig = { ...DEFAULT_CONFIG, ...options };
+  configureTunnel({ minJitter: cfg.minJitter, maxJitter: cfg.maxJitter, maxConcurrent: cfg.maxConcurrent });
+
+  const search = deps?.search ?? braveSearch;
+  const fetchPage = deps?.fetchPage ?? tunnel;
+
   researchedTopics.clear();
   resetDAG();
-  activeRequests = 0;
 
-  // Create root node
-  const root = createRootNode(topic);
-  if (!root) {
+  const rootTopicN = normalizeTopic(topic);
+  const startedAt = Date.now();
+  const delta: RunDelta = { skippedResearched: 0, revalidated: 0, changedNodes: 0, expandedNodes: 0, failedNodes: 0 };
+
+  const store = new Store(cfg.storePath ?? defaultStorePath());
+
+  try {
+    // Cross-run dedup: every topic ever stored is off-limits for expansion.
+    for (const t of store.knownTopics()) researchedTopics.add(t);
+
+    const priorRows = store.getNodesByRoot(rootTopicN);
+    const priorCompleteIds = new Set<string>();
+
+    let idByTopic = new Map<string, string>();
+    let root: ResearchNode | null;
+
+    if (priorRows.length > 0) {
+      idByTopic = rebuildDagFromStore(priorRows);
+      const rootId = idByTopic.get(rootTopicN);
+      root = rootId ? getNode(rootId) : null;
+      for (const row of priorRows) {
+        if (row.status === 'complete') {
+          const dagId = idByTopic.get(normalizeTopic(row.topic));
+          if (dagId) priorCompleteIds.add(dagId);
+        }
+      }
+    } else {
+      root = createRootNode(topic);
+    }
+
+    if (!root) {
+      return {
+        topic,
+        nodesExplored: 0,
+        nodesComplete: 0,
+        maxDepthReached: 0,
+        markdown: '# No results\n\nFailed to create root node.',
+        nodes: [],
+        exitReason: 'no_pending',
+        delta,
+      };
+    }
+
+    researchedTopics.add(rootTopicN);
+
+    const ctx: NodeContext = {
+      cfg,
+      store,
+      deps: { search, fetchPage },
+      delta,
+      expandedCount: { n: 0 },
+      rootTopicN,
+    };
+
+    const requeuedIds: string[] = [];
+    // ── Staleness pass (resume only): bounded revalidation ─────────
+    if (cfg.resume && priorRows.length > 0) {
+      const stale = store.getStaleCandidates(rootTopicN, cfg.stalenessTtlMs, cfg.maxRevalidate);
+      for (const row of stale) {
+        const dagId = idByTopic.get(normalizeTopic(row.topic));
+        if (!dagId) continue;
+        delta.revalidated++;
+
+        const sourceUrl = row.sources[0];
+        if (!sourceUrl) continue;
+
+        const recipe = store.getRecipe(domainOf(sourceUrl));
+        const res = await fetchPage(sourceUrl, recipe);
+        if (!res.success) continue; // unreachable this run — leave as-is
+
+        const newHash = sha256(res.content.substring(0, cfg.maxContentPerPage));
+        if (row.contentHash && newHash !== row.contentHash) {
+          requeueNode(dagId); // changed page → re-research this node
+          requeuedIds.push(dagId);
+          delta.changedNodes++;
+          // Persist the invalidation NOW so a crash can't leave the store
+          // claiming "complete" while the DAG says pending.
+          store.upsertNode({ ...row, status: 'pending', updatedAt: Date.now() });
+        } else {
+          store.touchNode(normalizeTopic(row.topic), Date.now());
+        }
+      }
+    }
+
+    // ── Fresh runs: reserve the root in the store BEFORE processing so a
+    // crash mid-root still leaves the topic key claimed. Resumed roots
+    // come from the store already.
+    if (priorRows.length === 0) {
+      const now = Date.now();
+      store.upsertNode({
+        topic: rootTopicN,
+        rootTopic: rootTopicN,
+        parentTopic: null,
+        depth: 0,
+        status: 'pending',
+        contentHash: null,
+        content: null,
+        sources: [],
+        subtopics: [],
+        fetchError: null,
+        createdAt: now,
+        updatedAt: now,
+      });
+      await processNode(root, ctx);
+    }
+
+    // Process pending nodes (breadth-first)
+    let iterations = 0;
+    let exitReason: DiveResult['exitReason'] = 'convergence';
+
+    while (iterations < cfg.maxNodes) {
+      const pending = getPendingNodes();
+
+      if (pending.length === 0) {
+        exitReason = 'convergence';
+        break;
+      }
+
+      const stats = getStats();
+      if (stats.totalNodes >= cfg.maxNodes) {
+        exitReason = 'max_nodes';
+        break;
+      }
+      if (stats.maxDepth >= cfg.maxDepth) {
+        exitReason = 'max_depth';
+        break;
+      }
+
+      // Process next batch — concurrency lives inside tunnel now
+      const batch = pending.slice(0, cfg.maxConcurrent);
+      await Promise.all(batch.map(node => processNode(node, ctx)));
+
+      iterations++;
+    }
+
+    delta.expandedNodes = ctx.expandedCount.n;
+
+    // Honest skip accounting: complete-before-this-run nodes that were not
+    // invalidated (changed) and did not end failed after reprocessing.
+    const reprocessedThenFailed = requeuedIds.filter(id => getNode(id)?.status === 'failed').length;
+    delta.skippedResearched = Math.max(0, priorCompleteIds.size - delta.changedNodes - reprocessedThenFailed);
+
+    store.saveRun({
+      id: `run-${startedAt}`,
+      rootTopic: rootTopicN,
+      startedAt,
+      finishedAt: Date.now(),
+      delta,
+    });
+
+    const finalStats = getStats();
+
     return {
       topic,
-      nodesExplored: 0,
-      nodesComplete: 0,
-      maxDepthReached: 0,
-      markdown: '# No results\n\nFailed to create root node.',
-      nodes: [],
-      exitReason: 'no_pending',
+      nodesExplored: finalStats.totalNodes,
+      nodesComplete: finalStats.completeNodes,
+      maxDepthReached: finalStats.maxDepth,
+      markdown: exportToMarkdown(),
+      nodes: getAllNodes(),
+      exitReason,
+      delta,
     };
+  } finally {
+    store.close();
   }
-
-  // Process root
-  await processNode(root);
-
-  // Process pending nodes (breadth-first)
-  let iterations = 0;
-  let exitReason: DiveResult['exitReason'] = 'no_pending';
-
-  while (iterations < config.maxNodes) {
-    const pending = getPendingNodes();
-
-    if (pending.length === 0) {
-      exitReason = 'convergence';
-      break;
-    }
-
-    const stats = getStats();
-    if (stats.totalNodes >= config.maxNodes) {
-      exitReason = 'max_nodes';
-      break;
-    }
-    if (stats.maxDepth >= config.maxDepth) {
-      exitReason = 'max_depth';
-      break;
-    }
-
-    // Process next batch
-    const batch = pending.slice(0, config.maxConcurrent - activeRequests);
-    await Promise.all(batch.map(node => processNode(node)));
-
-    iterations++;
-  }
-
-  const finalStats = getStats();
-
-  return {
-    topic,
-    nodesExplored: finalStats.totalNodes,
-    nodesComplete: finalStats.completeNodes,
-    maxDepthReached: finalStats.maxDepth,
-    markdown: exportToMarkdown(),
-    nodes: getAllNodes(),
-    exitReason,
-  };
-}
-
-/**
- * Configure the rabbithole.
- */
-export function configure(newConfig: Partial<RabbitHoleConfig>): void {
-  config = { ...config, ...newConfig };
 }
