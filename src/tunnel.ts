@@ -5,21 +5,26 @@
  * No browser automation, no Supabase, no cloud — pure Node.js fetch
  * with human-like timing patterns.
  *
+ * Content is extracted with linkedom (extractGeneric / extract), not regex
+ * tag-stripping, so Wikipedia chrome does not leak into page prose.
+ *
  * Ported from HybridEngineV3/src/lib/cognition/tunnel.ts
  * Stripped of Supabase edge functions and Capacitor native bridge.
  */
+
+import { extract, type Extraction, type RecipeLike } from './extract.js';
 
 // ═══════════════════════════════════════════════════════════════════
 // TYPES
 // ═══════════════════════════════════════════════════════════════════
 
-export interface TunnelResult {
+export interface TunnelResult extends Extraction {
   success: boolean;
   url: string;
-  title: string;
-  content: string;
   excerpt: string;
   timestamp: number;
+  error: string | null;
+  status?: number;
 }
 
 export interface TunnelConfig {
@@ -61,6 +66,10 @@ function sleep(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
+function emptyExtraction(): Extraction {
+  return { title: '', content: '', links: [], selector: null, usedRecipe: false, yieldChars: 0 };
+}
+
 // ═══════════════════════════════════════════════════════════════════
 // CORE
 // ═══════════════════════════════════════════════════════════════════
@@ -68,8 +77,9 @@ function sleep(ms: number): Promise<void> {
 /**
  * Tunnel into a URL and extract content.
  * Applies jitter delay and concurrency limiting.
+ * `recipe` (optional) enables per-domain extraction memory.
  */
-export async function tunnel(url: string): Promise<TunnelResult> {
+export async function tunnel(url: string, recipe?: RecipeLike | null): Promise<TunnelResult> {
   // Normalize URL
   let normalizedUrl = url.trim();
   if (!normalizedUrl.startsWith('http://') && !normalizedUrl.startsWith('https://')) {
@@ -103,34 +113,37 @@ export async function tunnel(url: string): Promise<TunnelResult> {
 
     if (!response.ok) {
       return {
+        ...emptyExtraction(),
         success: false,
         url: normalizedUrl,
-        title: '',
-        content: '',
         excerpt: '',
         timestamp: Date.now(),
+        error: `HTTP ${response.status}`,
+        status: response.status,
       };
     }
 
     const html = await response.text();
-    const { title, content } = extractContent(html);
+    const ex = extract(html, recipe ?? null);
+    const ok = ex.yieldChars > 0;
 
     return {
-      success: true,
+      ...ex,
+      success: ok,
       url: normalizedUrl,
-      title,
-      content,
-      excerpt: content.substring(0, 200),
+      excerpt: ok ? ex.content.substring(0, 200) : '',
       timestamp: Date.now(),
+      error: ok ? null : 'no extractable article text',
+      status: response.status,
     };
   } catch (err) {
     return {
+      ...emptyExtraction(),
       success: false,
       url: normalizedUrl,
-      title: '',
-      content: '',
       excerpt: '',
       timestamp: Date.now(),
+      error: err instanceof Error ? err.message : String(err),
     };
   } finally {
     activeRequests--;
@@ -156,38 +169,4 @@ export function configureTunnel(newConfig: Partial<TunnelConfig>): void {
  */
 export function getTunnelStats(): { active: number; config: TunnelConfig } {
   return { active: activeRequests, config };
-}
-
-// ═══════════════════════════════════════════════════════════════════
-// CONTENT EXTRACTION — Lightweight HTML → text
-// ═══════════════════════════════════════════════════════════════════
-
-function extractContent(html: string): { title: string; content: string } {
-  // Extract title
-  const titleMatch = html.match(/<title[^>]*>([^<]+)<\/title>/i);
-  const title = titleMatch ? titleMatch[1].trim() : '';
-
-  // Strip scripts, styles, and tags
-  let text = html
-    .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '')
-    .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '')
-    .replace(/<nav[^>]*>[\s\S]*?<\/nav>/gi, '')
-    .replace(/<footer[^>]*>[\s\S]*?<\/footer>/gi, '')
-    .replace(/<header[^>]*>[\s\S]*?<\/header>/gi, '')
-    .replace(/<[^>]+>/g, ' ')
-    .replace(/&nbsp;/g, ' ')
-    .replace(/&amp;/g, '&')
-    .replace(/&lt;/g, '<')
-    .replace(/&gt;/g, '>')
-    .replace(/&quot;/g, '"')
-    .replace(/&#39;/g, "'")
-    .replace(/\s+/g, ' ')
-    .trim();
-
-  // Cap at 10K chars
-  if (text.length > 10000) {
-    text = text.substring(0, 10000) + '...';
-  }
-
-  return { title, content: text };
 }
