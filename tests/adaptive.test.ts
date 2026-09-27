@@ -40,6 +40,31 @@ test('ambiguous relocation declines to claim adaptive recovery', () => {
   assert.equal(extract(html, learned()).method, 'generic');
 });
 
+test('a similar reused selector yields to a stronger relocation and preserves its fingerprint', () => {
+  const recipe = learned();
+  const html = page(`<article id="old" class="teaser" role="main"><p>${'Teaser text. '.repeat(30)}</p></article><article id="new" class="story" role="main"><p>${prose}</p></article>`);
+  const ex = extract(html, recipe);
+  assert.equal(ex.method, 'adaptive');
+  assert.equal(ex.selector, 'article#new');
+  assert.equal(ex.content, prose.trim());
+  const next = nextRecipe('example.test', recipe, { usedRecipe: ex.usedRecipe, recipeYield: ex.yieldChars, genericYield: 0, genericSelector: null, matchedSelector: ex.selector, fingerprint: ex.fingerprint });
+  assert.equal(next.selector, 'article#new');
+  assert.deepEqual(next.fingerprint, recipe.fingerprint);
+});
+
+test('a changed selector fingerprint falls back when relocation candidates tie', () => {
+  const html = page(`<article id="old" class="teaser" role="main"><p>${prose}</p></article><article id="new" class="preview" role="main"><p>${prose}</p></article>`);
+  assert.deepEqual(extract(html, learned()), extractGeneric(html));
+});
+
+test('an exact selector fingerprint still wins over an equally strong candidate', () => {
+  const html = page(`<article id="old" class="story" role="main"><p>${prose}</p></article><article id="new" class="story" role="main"><p>${'Other prose. '.repeat(30)}</p></article>`);
+  const ex = extract(html, learned());
+  assert.equal(ex.method, 'recipe');
+  assert.equal(ex.selector, 'article#old');
+  assert.equal(ex.content, prose.trim());
+});
+
 test('invalid stored selectors fall back without throwing', () => {
   const ex = extract(original, { selector: '[bad', yieldChars: 1000, wins: 1, fallbackStreak: 0 });
   assert.equal(ex.method, 'generic');
@@ -58,6 +83,26 @@ test('hidden markup stays out of research evidence and fingerprints', () => {
   const html = page(`<article><p>${prose}</p><div hidden>hidden instruction</div><p aria-hidden="true">aria instruction</p><p style="display: none">style instruction</p></article>`);
   assert.ok(!extractGeneric(html).content.includes('instruction'));
 });
+
+for (const tag of ['body', 'html']) {
+  for (const hidden of ['hidden', 'inert', 'aria-hidden="true"', 'style="display:none"', 'style="visibility: hidden !important"']) {
+    test(`hidden ${tag} (${hidden}) is neither extracted nor learned`, () => {
+      const html = original.replace(`<${tag}>`, `<${tag} ${hidden}>`);
+      for (const ex of [extractGeneric(html), extract(html, learned())]) {
+        assert.equal(ex.content, '');
+        assert.equal(ex.yieldChars, 0);
+        assert.equal(ex.selector, null);
+        assert.equal(ex.fingerprint, null);
+        assert.equal(ex.usedRecipe, false);
+        assert.equal(ex.method, 'generic');
+        const next = nextRecipe('example.test', null, { usedRecipe: ex.usedRecipe, recipeYield: 0, genericYield: ex.yieldChars, genericSelector: ex.selector, fingerprint: ex.fingerprint });
+        assert.equal(next.healed, false);
+        assert.equal(next.selector, null);
+        assert.equal(next.fingerprint, null);
+      }
+    });
+  }
+}
 
 test('fingerprint persists across database reopen and recovers later', () => {
   const file = join(mkdtempSync(join(tmpdir(), 'rh-adaptive-')), 'state.db');

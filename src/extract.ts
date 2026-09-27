@@ -78,10 +78,18 @@ const CHROME_SELECTORS = 'script, style, nav, footer, header, aside, noscript, t
 
 const CANDIDATE_TAGS = 'article, main, section, div, td, body';
 
+function isHidden(el: Element): boolean {
+  for (let current: Element | null = el; current; current = current.parentElement) {
+    if (current.matches('[hidden], [inert], [aria-hidden="true"]')
+      || /(?:^|;)\s*(?:display\s*:\s*none|visibility\s*:\s*hidden)\s*(?:!important\s*)?(?:;|$)/i.test(current.getAttribute('style') ?? '')) return true;
+  }
+  return false;
+}
+
 function stripChrome(root: Element): void {
   root.querySelectorAll(CHROME_SELECTORS).forEach(el => el.remove());
   root.querySelectorAll('[style]').forEach(el => {
-    if (/(?:^|;)\s*(?:display\s*:\s*none|visibility\s*:\s*hidden)\s*(?:!important\s*)?(?:;|$)/i.test(el.getAttribute('style') ?? '')) el.remove();
+    if (isHidden(el)) el.remove();
   });
 }
 
@@ -247,7 +255,7 @@ export function extractGeneric(html: string): Extraction {
   // linkedom's .body getter throws when the document has no root element
   // (empty or fragment-only input) — bail out before touching it.
   const body = document.documentElement ? document.body : null;
-  if (!body) {
+  if (!body || isHidden(body)) {
     return { title, content: '', links: [], selector: null, usedRecipe: false, yieldChars: 0, fingerprint: null, method: 'generic' };
   }
   // Harvest links from the full body BEFORE stripping chrome: nav/footer
@@ -293,7 +301,7 @@ export function extract(html: string, recipe: RecipeLike | null, config: Partial
   try {
     const matches = body.querySelectorAll(recipe.selector);
     const el = matches.length === 1 ? matches[0] : null;
-    if (el && (!saved || JSON.stringify(saved) === JSON.stringify(fingerprint(el)) || similarity(saved, fingerprint(el)) >= 0.65)) {
+    if (el && (!saved || JSON.stringify(saved) === JSON.stringify(fingerprint(el)))) {
       const hit = take(el, recipe.selector, 'recipe');
       if (hit) return hit;
     }
