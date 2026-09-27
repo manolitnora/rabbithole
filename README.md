@@ -80,6 +80,7 @@ await dive('topic', {
   stalenessTtlMs: 604800000, // complete nodes older than this get revalidated (7d)
   maxRevalidate: 5,         // max refetch-based staleness checks per run
   storePath: null,          // null → .rabbithole/state.db (override via RH_HOME)
+  mode: 'dive',             // 'kill' = search and fetch only, no mitosis
 });
 ```
 

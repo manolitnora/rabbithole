@@ -269,4 +269,15 @@ describe('dive — compounding semantics', () => {
     assert.equal(run.nodes[0].topic, topic);
     assert.equal(run.nodesComplete, 1);
   });
+
+  test('kill mode explores the root without spawning children', async () => {
+    const storePath = tempStorePath();
+    const pages = new Map<string, () => string>();
+    pages.set('https://site.test/p-topic-eta', () => BIGRAM_RICH('spike sorting', 'eta prose.'));
+    const run = await dive('topic eta', { storePath, maxNodes: 6, mode: 'kill' }, makeDeps({ pages }).deps);
+    assert.equal(run.nodes.length, 1, 'kill mode must not spawn children');
+    assert.equal(run.nodes[0].depth, 0);
+    assert.deepEqual(run.nodes[0].subTopics, []);
+    assert.equal(run.nodesComplete, 1);
+  });
 });
