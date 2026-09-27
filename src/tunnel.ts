@@ -25,6 +25,7 @@ export interface TunnelResult extends Extraction {
   timestamp: number;
   error: string | null;
   status?: number;
+  attempts?: number;
 }
 
 export interface TunnelConfig {
@@ -33,6 +34,10 @@ export interface TunnelConfig {
   maxConcurrent: number;    // max parallel requests
   timeout: number;          // ms — per-request timeout
   userAgent: string;
+  maxRetries: number;
+  retryDelayMs: number;
+  maxRetryDelayMs: number;
+  maxResponseBytes: number;
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -44,6 +49,10 @@ const DEFAULT_CONFIG: TunnelConfig = {
   maxJitter: 5000,
   maxConcurrent: 3,
   timeout: 30000,
+  maxRetries: 2,
+  retryDelayMs: 1000,
+  maxRetryDelayMs: 5000,
+  maxResponseBytes: 2_000_000,
   userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko)',
 };
 
@@ -58,8 +67,37 @@ let activeRequests = 0;
 // JITTER — Anti-bot timing
 // ═══════════════════════════════════════════════════════════════════
 
-function jitter(): number {
-  return Math.floor(Math.random() * (config.maxJitter - config.minJitter)) + config.minJitter;
+function jitter(cfg: TunnelConfig): number {
+  return Math.floor(Math.random() * (cfg.maxJitter - cfg.minJitter)) + cfg.minJitter;
+}
+
+function retryDelay(header: string | null, attempt: number, cfg: TunnelConfig): number {
+  if (header !== null) {
+    if (/^\d+$/.test(header.trim())) return Number(header) * 1000;
+    const date = Date.parse(header);
+    if (Number.isFinite(date)) return Math.max(0, date - Date.now());
+  }
+  return Math.min(cfg.maxRetryDelayMs, cfg.retryDelayMs * 2 ** (attempt - 1));
+}
+
+async function readHtml(response: Response, limit: number): Promise<string> {
+  const reader = response.body?.getReader();
+  if (!reader) return '';
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      size += value.byteLength;
+      if (size > limit) throw new Error('response too large');
+      chunks.push(value);
+    }
+    return new TextDecoder().decode(Buffer.concat(chunks));
+  } finally {
+    await reader.cancel().catch(() => {});
+    reader.releaseLock();
+  }
 }
 
 function sleep(ms: number): Promise<void> {
@@ -80,6 +118,7 @@ function emptyExtraction(): Extraction {
  * `recipe` (optional) enables per-domain extraction memory.
  */
 export async function tunnel(url: string, recipe?: RecipeLike | null): Promise<TunnelResult> {
+  const cfg = { ...config };
   // Normalize URL
   let normalizedUrl = url.trim();
   if (!normalizedUrl.startsWith('http://') && !normalizedUrl.startsWith('https://')) {
@@ -87,55 +126,48 @@ export async function tunnel(url: string, recipe?: RecipeLike | null): Promise<T
   }
 
   // Wait for slot
-  while (activeRequests >= config.maxConcurrent) {
-    await sleep(500);
+  while (activeRequests >= cfg.maxConcurrent) {
+    await sleep(25);
   }
 
   activeRequests++;
+  let attempts = 0;
 
   try {
-    // Anti-bot jitter
-    await sleep(jitter());
-
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), config.timeout);
-
-    const response = await fetch(normalizedUrl, {
-      headers: {
-        'User-Agent': config.userAgent,
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-        'Accept-Language': 'en-US,en;q=0.5',
-      },
-      signal: controller.signal,
-    });
-
-    clearTimeout(timeout);
-
-    if (!response.ok) {
-      return {
-        ...emptyExtraction(),
-        success: false,
-        url: normalizedUrl,
-        excerpt: '',
-        timestamp: Date.now(),
-        error: `HTTP ${response.status}`,
-        status: response.status,
-      };
+    await sleep(jitter(cfg));
+    for (;;) {
+      attempts++;
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), cfg.timeout);
+      let delay = 0;
+      try {
+        const response = await fetch(normalizedUrl, {
+          headers: {
+            'User-Agent': cfg.userAgent,
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.5',
+          },
+          signal: controller.signal,
+        });
+        if (!response.ok) {
+          await response.body?.cancel();
+          delay = retryDelay(response.headers.get('retry-after'), attempts, cfg);
+          const retry = (response.status === 429 || response.status === 503)
+            && attempts <= cfg.maxRetries && delay <= cfg.maxRetryDelayMs;
+          if (!retry) {
+            return { ...emptyExtraction(), success: false, url: normalizedUrl, excerpt: '',
+              timestamp: Date.now(), error: `HTTP ${response.status}`, status: response.status, attempts };
+          }
+        } else {
+          const html = await readHtml(response, cfg.maxResponseBytes);
+          const ex = extract(html, recipe ?? null);
+          const ok = ex.yieldChars > 0;
+          return { ...ex, success: ok, url: normalizedUrl, excerpt: ok ? ex.content.substring(0, 200) : '',
+            timestamp: Date.now(), error: ok ? null : 'no extractable article text', status: response.status, attempts };
+        }
+      } finally { clearTimeout(timeout); }
+      await sleep(delay);
     }
-
-    const html = await response.text();
-    const ex = extract(html, recipe ?? null);
-    const ok = ex.yieldChars > 0;
-
-    return {
-      ...ex,
-      success: ok,
-      url: normalizedUrl,
-      excerpt: ok ? ex.content.substring(0, 200) : '',
-      timestamp: Date.now(),
-      error: ok ? null : 'no extractable article text',
-      status: response.status,
-    };
   } catch (err) {
     return {
       ...emptyExtraction(),
@@ -144,6 +176,7 @@ export async function tunnel(url: string, recipe?: RecipeLike | null): Promise<T
       excerpt: '',
       timestamp: Date.now(),
       error: err instanceof Error ? err.message : String(err),
+      attempts,
     };
   } finally {
     activeRequests--;
@@ -161,7 +194,15 @@ export async function tunnelBatch(urls: string[]): Promise<TunnelResult[]> {
  * Configure tunnel parameters.
  */
 export function configureTunnel(newConfig: Partial<TunnelConfig>): void {
-  config = { ...config, ...newConfig };
+  const next = { ...config, ...newConfig };
+  for (const key of ['minJitter', 'maxJitter', 'retryDelayMs', 'maxRetryDelayMs', 'maxRetries'] as const) {
+    if (!Number.isSafeInteger(next[key]) || next[key] < 0) throw new Error(`invalid ${key}`);
+  }
+  for (const key of ['timeout', 'maxConcurrent', 'maxResponseBytes'] as const) {
+    if (!Number.isSafeInteger(next[key]) || next[key] <= 0) throw new Error(`invalid ${key}`);
+  }
+  if (next.minJitter > next.maxJitter || next.maxRetries > 5) throw new Error('invalid fetch policy');
+  config = next;
 }
 
 /**
