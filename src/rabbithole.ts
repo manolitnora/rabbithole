@@ -63,6 +63,8 @@ export interface RabbitHoleConfig {
   maxRevalidate: number;
   /** SQLite path; null → defaultStorePath(). */
   storePath: string | null;
+  /** 'kill' runs search and fetch only; 'dive' expands sub-topics. */
+  mode: 'kill' | 'dive';
 }
 
 /** Per-call options. `searchQuery` anchors the root search in a focused phrase
@@ -104,6 +106,7 @@ const DEFAULT_CONFIG: RabbitHoleConfig = {
   stalenessTtlMs: 7 * 24 * 3600_000,
   maxRevalidate: 5,
   storePath: null,
+  mode: 'dive',
 };
 
 // ═══════════════════════════════════════════════════════════════════
@@ -282,7 +285,8 @@ async function processNode(node: ResearchNode, ctx: NodeContext): Promise<void> 
     const storedContent = combinedContent.substring(0, cfg.maxContentPerPage);
 
     // Extract sub-topics for deeper research
-    const subTopics = extractSubTopics(combinedContent, node.topic);
+    // Kill mode: never extract sub-topics or spawn children.
+    const subTopics = cfg.mode === 'kill' ? [] : extractSubTopics(combinedContent, node.topic);
 
     // Update in-memory DAG
     updateNodeWithResults(node.id, storedContent, sources, subTopics);
