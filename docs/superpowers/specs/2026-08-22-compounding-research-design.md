@@ -10,10 +10,11 @@ LLM-per-step and stateless between runs. Every memory engine (Cognee, Graphiti)
 persists knowledge but never traverses the live web. Scrapling heals known
 selectors but has no search/topic concept. Nobody builds research that
 compounds: persistent topic DAGs, incremental frontier expansion, and
-self-healing extraction — all deterministic (zero LLM).
+self-healing extraction. See [Sub-topic extraction](../../../README.md#sub-topic-extraction)
+for the current extraction modes and fallback contract.
 
-Rabbithole already owns the novel traversal shape (search-driven mitosis,
-topic DAG, zero-LLM heuristics). It is stateless: every dive starts from zero.
+At the time of this design, Rabbithole already owned the novel traversal shape
+(search-driven mitosis, topic DAG). It was stateless: every dive started from zero.
 This design makes state the product.
 
 ## Goals
