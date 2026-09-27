@@ -1,11 +1,7 @@
 /**
  * Extract — Structure-aware content extraction with per-domain recipe memory.
  *
- * Replaces regex tag-stripping. linkedom parses; candidate containers are
- * scored by text density (prose beats chrome). The winning selector per
- * domain is persisted as a "recipe"; when a recipe's yield collapses, the
- * generic pipeline takes over and heals the recipe after two consecutive
- * dominant generic wins. All deterministic — no LLM.
+ * Recipe behavior and hidden-content limits: README.md#when-a-site-changes.
  */
 
 import { parseHTML } from 'linkedom';
@@ -279,8 +275,8 @@ export function extractGeneric(html: string): Extraction {
 }
 
 /**
- * Full extraction with recipe memory. Tries the stored selector first;
- * on collapse (< minRecipeYield) falls through to the generic pipeline.
+ * A reused selector is not proof of identity: changed fingerprints must
+ * compete with relocation candidates before recipe content is accepted.
  */
 export function extract(html: string, recipe: RecipeLike | null, config: Partial<ExtractConfig> = {}): Extraction {
   const cfg = { ...DEFAULT_EXTRACT_CONFIG, ...config };
