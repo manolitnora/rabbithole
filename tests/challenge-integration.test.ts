@@ -36,6 +36,9 @@ test('HTTP 200 challenges never persist prose or teach recipes; genuine articles
     ['article title', 'Just a moment', prose, '', false],
     ['article ellipsis title', 'Just a moment...', prose, '', false],
     ['ordinary article', 'Research', prose, '', false],
+    ['ordinary challenges class', 'Study Notes', prose, '<div class="challenges"></div>', false],
+    ['ordinary challenge-list id', 'Study Notes', prose, '<div id="challenge-list"></div>', false],
+    ['ordinary challenge-card class', 'Study Notes', prose, '<section class="challenge-card"></section>', false],
   ] as const;
   try {
     for (const [i, [name, title, content, structure, rejected]] of cases.entries()) {
