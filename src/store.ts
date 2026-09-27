@@ -13,6 +13,7 @@
 import { DatabaseSync } from 'node:sqlite';
 import { mkdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
+import { parseFingerprint, type ElementFingerprint } from './extract.js';
 
 // ═══════════════════════════════════════════════════════════════════
 // TYPES
@@ -50,6 +51,7 @@ export interface Recipe {
   fallbackStreak: number;
   wins: number;
   updatedAt: number;
+  fingerprint?: ElementFingerprint | null;
 }
 
 export interface RunDelta {
@@ -102,7 +104,8 @@ CREATE TABLE IF NOT EXISTS recipes (
   yield_chars INTEGER NOT NULL DEFAULT 0,
   fallback_streak INTEGER NOT NULL DEFAULT 0,
   wins INTEGER NOT NULL DEFAULT 0,
-  updated_at INTEGER NOT NULL
+  updated_at INTEGER NOT NULL,
+  fingerprint TEXT
 );
 
 CREATE TABLE IF NOT EXISTS runs (
@@ -132,6 +135,10 @@ export class Store {
     try {
       this.db.exec('ALTER TABLE nodes ADD COLUMN probe_hash TEXT');
     } catch { /* already exists */ }
+    const columns = this.db.prepare('PRAGMA table_info(recipes)').all();
+    if (!columns.some(column => column.name === 'fingerprint')) {
+      this.db.exec('ALTER TABLE recipes ADD COLUMN fingerprint TEXT');
+    }
   }
 
   close(): void {
@@ -207,18 +214,20 @@ export class Store {
       fallbackStreak: row.fallback_streak as number,
       wins: row.wins as number,
       updatedAt: row.updated_at as number,
+      fingerprint: readFingerprint(row.fingerprint),
     };
   }
 
   saveRecipe(r: Recipe): void {
     this.db.prepare(`
-      INSERT INTO recipes (domain, selector, yield_chars, fallback_streak, wins, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?)
+      INSERT INTO recipes (domain, selector, yield_chars, fallback_streak, wins, updated_at, fingerprint)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(domain) DO UPDATE SET
         selector=excluded.selector, yield_chars=excluded.yield_chars,
         fallback_streak=excluded.fallback_streak, wins=excluded.wins,
-        updated_at=excluded.updated_at
-    `).run(r.domain, r.selector, r.yieldChars, r.fallbackStreak, r.wins, r.updatedAt);
+        updated_at=excluded.updated_at, fingerprint=excluded.fingerprint
+    `).run(r.domain, r.selector, r.yieldChars, r.fallbackStreak, r.wins, r.updatedAt,
+      r.fingerprint ? JSON.stringify(r.fingerprint) : null);
   }
 
   // ── Runs ─────────────────────────────────────────────────────────
@@ -248,6 +257,12 @@ export class Store {
 // ═══════════════════════════════════════════════════════════════════
 // ROW MAPPING
 // ═══════════════════════════════════════════════════════════════════
+
+function readFingerprint(raw: unknown): ElementFingerprint | null {
+  if (typeof raw !== 'string') return null;
+  try { return parseFingerprint(JSON.parse(raw)); }
+  catch { return null; }
+}
 
 function rowToNode(row: Record<string, unknown>): StoredNode {
   return {

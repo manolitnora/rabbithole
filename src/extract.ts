@@ -14,6 +14,14 @@ import { parseHTML } from 'linkedom';
 // TYPES
 // ═══════════════════════════════════════════════════════════════════
 
+export interface ElementFingerprint {
+  tag: string;
+  attributes: Record<string, string>;
+  classes: string[];
+  parentTag: string | null;
+  childTags: string[];
+}
+
 export interface Extraction {
   title: string;
   content: string;
@@ -23,6 +31,8 @@ export interface Extraction {
   /** Whether a stored recipe produced the content. */
   usedRecipe: boolean;
   yieldChars: number;
+  fingerprint?: ElementFingerprint | null;
+  method?: 'generic' | 'recipe' | 'adaptive';
 }
 
 export interface RecipeOutcome {
@@ -30,6 +40,8 @@ export interface RecipeOutcome {
   recipeYield: number;
   genericYield: number;
   genericSelector: string | null;
+  matchedSelector?: string | null;
+  fingerprint?: ElementFingerprint | null;
 }
 
 export interface RecipeLike {
@@ -37,6 +49,7 @@ export interface RecipeLike {
   yieldChars: number;
   fallbackStreak: number;
   wins: number;
+  fingerprint?: ElementFingerprint | null;
 }
 
 export interface ExtractConfig {
@@ -61,7 +74,7 @@ export const DEFAULT_EXTRACT_CONFIG: ExtractConfig = {
 // DOM HELPERS
 // ═══════════════════════════════════════════════════════════════════
 
-const CHROME_SELECTORS = 'script, style, nav, footer, header, aside, noscript, template, svg, iframe, form';
+const CHROME_SELECTORS = 'script, style, nav, footer, header, aside, noscript, template, svg, iframe, form, [hidden], [inert], [aria-hidden="true"]';
 
 const CANDIDATE_TAGS = 'article, main, section, div, td, body';
 
@@ -79,11 +92,63 @@ function isBrowserChallenge(title: string, content: string): boolean {
 
 function rejectChallenge(ex: Extraction): Extraction {
   if (!isBrowserChallenge(ex.title, ex.content)) return ex;
-  return { title: ex.title, content: '', links: [], selector: null, usedRecipe: false, yieldChars: 0 };
+  return { title: ex.title, content: '', links: [], selector: null, usedRecipe: false, yieldChars: 0, fingerprint: null, method: 'generic' };
 }
 
 function stripChrome(root: Element): void {
   root.querySelectorAll(CHROME_SELECTORS).forEach(el => el.remove());
+  root.querySelectorAll('[style]').forEach(el => {
+    if (/(?:^|;)\s*(?:display\s*:\s*none|visibility\s*:\s*hidden)\s*(?:!important\s*)?(?:;|$)/i.test(el.getAttribute('style') ?? '')) el.remove();
+  });
+}
+
+const FINGERPRINT_ATTRIBUTES = ['role', 'itemprop', 'data-testid'];
+
+function fingerprint(el: Element): ElementFingerprint {
+  return {
+    tag: el.tagName.toLowerCase(),
+    attributes: Object.fromEntries(FINGERPRINT_ATTRIBUTES.flatMap(key => {
+      const value = el.getAttribute(key);
+      return value ? [[key, value.slice(0, 200)]] : [];
+    })),
+    classes: [...new Set((el.getAttribute('class') ?? '').split(/\s+/).filter(Boolean))].sort().slice(0, 20),
+    parentTag: el.parentElement?.tagName.toLowerCase() ?? null,
+    childTags: [...new Set(Array.from(el.children, child => child.tagName.toLowerCase()))].sort(),
+  };
+}
+
+export function parseFingerprint(value: unknown): ElementFingerprint | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  if (!('tag' in value && 'attributes' in value && 'classes' in value && 'parentTag' in value && 'childTags' in value)) return null;
+  const { tag, attributes, classes, parentTag, childTags } = value;
+  const strings = (v: unknown): v is string[] => Array.isArray(v) && v.length <= 100 && v.every(s => typeof s === 'string' && s.length <= 200);
+  if (typeof tag !== 'string' || !/^[a-z][a-z0-9-]*$/.test(tag)) return null;
+  if (parentTag !== null && (typeof parentTag !== 'string' || !/^[a-z][a-z0-9-]*$/.test(parentTag))) return null;
+  if (!strings(classes) || !strings(childTags) || !attributes || typeof attributes !== 'object' || Array.isArray(attributes)) return null;
+  const parsedAttributes: Record<string, string> = {};
+  for (const [key, val] of Object.entries(attributes)) {
+    if (!FINGERPRINT_ATTRIBUTES.includes(key) || typeof val !== 'string' || val.length > 200) return null;
+    parsedAttributes[key] = val;
+  }
+  return { tag, attributes: parsedAttributes, classes, parentTag, childTags };
+}
+
+function overlap(a: string[], b: string[]): number {
+  const union = new Set([...a, ...b]);
+  return union.size ? a.filter(x => b.includes(x)).length / union.size : 0;
+}
+
+function similarity(a: ElementFingerprint, b: ElementFingerprint): number {
+  const attrs = Object.entries(a.attributes);
+  const attrScore = attrs.length ? attrs.filter(([k, v]) => b.attributes[k] === v).length / attrs.length : 0;
+  // Conservative relocation heuristics, not probabilities. Empty features add no evidence.
+  return (a.tag === b.tag ? 0.2 : 0) + 0.35 * attrScore
+    + 0.2 * overlap(a.classes, b.classes) + 0.15 * overlap(a.childTags, b.childTags)
+    + (a.parentTag && a.parentTag === b.parentTag ? 0.1 : 0);
+}
+
+function escapeIdentifier(value: string): string {
+  return value.replace(/(^-?\d)|[^a-zA-Z0-9_-]/g, match => Array.from(match, c => `\\${c.codePointAt(0)?.toString(16)} `).join(''));
 }
 
 function textStats(el: Element): { textLen: number; linkTextLen: number } {
@@ -113,9 +178,9 @@ export function selectorFor(el: Element): string | null {
   const tag = el.tagName?.toLowerCase();
   if (!tag || tag === 'body' || tag === 'html') return null;
   const id = el.getAttribute?.('id');
-  if (id) return `${tag}#${id}`;
+  if (id) return `${tag}#${escapeIdentifier(id)}`;
   const cls = el.getAttribute?.('class')?.trim().split(/\s+/)[0];
-  if (cls) return `${tag}.${cls}`;
+  if (cls) return `${tag}.${escapeIdentifier(cls)}`;
   return tag;
 }
 
@@ -200,7 +265,7 @@ export function extractGeneric(html: string): Extraction {
   // (empty or fragment-only input) — bail out before touching it.
   const body = document.documentElement ? document.body : null;
   if (!body) {
-    return { title, content: '', links: [], selector: null, usedRecipe: false, yieldChars: 0 };
+    return { title, content: '', links: [], selector: null, usedRecipe: false, yieldChars: 0, fingerprint: null, method: 'generic' };
   }
   // Harvest links from the full body BEFORE stripping chrome: nav/footer
   // links are real traversal signal; only prose content excludes them.
@@ -217,6 +282,8 @@ export function extractGeneric(html: string): Extraction {
     selector: picked?.selector ?? null,
     usedRecipe: false,
     yieldChars: content.length,
+    fingerprint: picked ? fingerprint(picked.el) : null,
+    method: 'generic',
   });
 }
 
@@ -228,19 +295,41 @@ export function extract(html: string, recipe: RecipeLike | null, config: Partial
   const cfg = { ...DEFAULT_EXTRACT_CONFIG, ...config };
   const generic = extractGeneric(html);
 
-  if (recipe?.selector) {
-    const { document } = parseHTML(html);
-    const el = document.querySelector(recipe.selector);
-    if (el) {
-      stripChrome(el);
-      const content = (el.textContent ?? '').replace(/\s+/g, ' ').trim();
-      if (content.length >= cfg.minRecipeYield) {
-        const links = collectLinks(el);
-        return rejectChallenge({ title: generic.title, content, links, selector: recipe.selector, usedRecipe: true, yieldChars: content.length });
+  if (!recipe?.selector || !generic.yieldChars) return generic;
+  const { document } = parseHTML(html);
+  const body = document.documentElement ? document.body : null;
+  if (!body) return generic;
+  stripChrome(body);
+  const saved = recipe.fingerprint;
+  const take = (el: Element, selector: string, method: 'recipe' | 'adaptive'): Extraction | null => {
+    const content = (el.textContent ?? '').replace(/\s+/g, ' ').trim();
+    if (content.length < cfg.minRecipeYield) return null;
+    return rejectChallenge({ title: generic.title, content, links: collectLinks(el), selector,
+      usedRecipe: true, yieldChars: content.length, fingerprint: fingerprint(el), method });
+  };
+  try {
+    const matches = body.querySelectorAll(recipe.selector);
+    const el = matches.length === 1 ? matches[0] : null;
+    if (el && (!saved || JSON.stringify(saved) === JSON.stringify(fingerprint(el)) || similarity(saved, fingerprint(el)) >= 0.65)) {
+      const hit = take(el, recipe.selector, 'recipe');
+      if (hit) return hit;
+    }
+  } catch { return generic; }
+
+  if (saved) {
+    const candidates = Array.from(body.querySelectorAll(CANDIDATE_TAGS))
+      .filter(el => (el.textContent ?? '').trim().length >= cfg.minRecipeYield)
+      .map(el => ({ el, score: similarity(saved, fingerprint(el)) }))
+      .sort((a, b) => b.score - a.score);
+    const best = candidates[0];
+    if (best && best.score >= 0.65 && best.score - (candidates[1]?.score ?? 0) >= 0.1) {
+      const selector = selectorFor(best.el);
+      if (selector && body.querySelectorAll(selector).length === 1) {
+        const hit = take(best.el, selector, 'adaptive');
+        if (hit) return hit;
       }
     }
   }
-
   return generic;
 }
 
@@ -261,12 +350,12 @@ export function nextRecipe(
   prev: RecipeLike | null,
   outcome: RecipeOutcome,
   config: Partial<ExtractConfig> = {},
-): { selector: string | null; yieldChars: number; fallbackStreak: number; wins: number; healed: boolean } {
+): RecipeLike & { healed: boolean } {
   const cfg = { ...DEFAULT_EXTRACT_CONFIG, ...config };
-  const now = { selector: prev?.selector ?? null, yieldChars: prev?.yieldChars ?? 0, fallbackStreak: prev?.fallbackStreak ?? 0, wins: prev?.wins ?? 0 };
+  const now = { selector: prev?.selector ?? null, yieldChars: prev?.yieldChars ?? 0, fallbackStreak: prev?.fallbackStreak ?? 0, wins: prev?.wins ?? 0, fingerprint: prev?.fingerprint ?? null };
 
   if (outcome.usedRecipe) {
-    return { selector: now.selector, yieldChars: outcome.recipeYield, fallbackStreak: 0, wins: now.wins + 1, healed: false };
+    return { selector: outcome.matchedSelector ?? now.selector, yieldChars: outcome.recipeYield, fallbackStreak: 0, wins: now.wins + 1, healed: false, fingerprint: outcome.fingerprint ?? now.fingerprint };
   }
 
   const genericDominant = outcome.genericYield >= cfg.minRecipeAdoptionYield
@@ -275,16 +364,16 @@ export function nextRecipe(
   if (!prev?.selector) {
     // No memory yet: adopt the generic selector if it earned one.
     if (outcome.genericSelector && outcome.genericYield >= cfg.minRecipeAdoptionYield) {
-      return { selector: outcome.genericSelector, yieldChars: outcome.genericYield, fallbackStreak: 0, wins: 0, healed: true };
+      return { selector: outcome.genericSelector, yieldChars: outcome.genericYield, fallbackStreak: 0, wins: 0, healed: true, fingerprint: outcome.fingerprint ?? null };
     }
     return { ...now, healed: false };
   }
 
-  const streak = now.fallbackStreak + 1;
-  if (streak >= cfg.healStreak && genericDominant && outcome.genericSelector) {
-    return { selector: outcome.genericSelector, yieldChars: outcome.genericYield, fallbackStreak: 0, wins: 0, healed: true };
+  const streak = genericDominant ? now.fallbackStreak + 1 : 0;
+  if (streak >= cfg.healStreak && outcome.genericSelector) {
+    return { selector: outcome.genericSelector, yieldChars: outcome.genericYield, fallbackStreak: 0, wins: 0, healed: true, fingerprint: outcome.fingerprint ?? null };
   }
-  return { selector: now.selector, yieldChars: now.yieldChars, fallbackStreak: streak, wins: now.wins, healed: false };
+  return { ...now, fallbackStreak: streak, healed: false };
 }
 
 /** Domain extraction from a URL (recipe key). */

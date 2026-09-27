@@ -25,7 +25,7 @@ import { createHash } from 'node:crypto';
 
 import { braveSearch, type SearchResult } from './brave.js';
 import { tunnel, configureTunnel, type TunnelResult } from './tunnel.js';
-import { domainOf, nextRecipe, type RecipeLike } from './extract.js';
+import { domainOf, nextRecipe, type RecipeLike, type RecipeOutcome } from './extract.js';
 import {
   resetDAG, createRootNode, addChildNode, markResearching,
   updateNodeWithResults, markFailed, requeueNode, getPendingNodes,
@@ -312,13 +312,7 @@ async function processNode(node: ResearchNode, ctx: NodeContext): Promise<void> 
     const contents: string[] = [];
     const sources: string[] = [];
     const errors: string[] = [];
-    const recipeOutcomes = new Map<string, {
-      prev: RecipeLike | null;
-      usedRecipe: boolean;
-      recipeYield: number;
-      genericYield: number;
-      genericSelector: string | null;
-    }>();
+    const recipeOutcomes = new Map<string, RecipeOutcome & { prev: RecipeLike | null }>();
 
     for (const result of searchResults.slice(0, 3)) {
       const domain = domainOf(result.url);
@@ -336,6 +330,8 @@ async function processNode(node: ResearchNode, ctx: NodeContext): Promise<void> 
             recipeYield: res.usedRecipe ? (res.yieldChars ?? res.content.length) : 0,
             genericYield: res.usedRecipe ? 0 : (res.yieldChars ?? res.content.length),
             genericSelector: res.usedRecipe ? null : (res.selector ?? null),
+            matchedSelector: res.usedRecipe ? res.selector : null,
+            fingerprint: res.fingerprint,
           });
         }
       } else if (res.error) {
@@ -349,6 +345,8 @@ async function processNode(node: ResearchNode, ctx: NodeContext): Promise<void> 
         recipeYield: oc.recipeYield,
         genericYield: oc.genericYield,
         genericSelector: oc.genericSelector,
+        matchedSelector: oc.matchedSelector,
+        fingerprint: oc.fingerprint,
       });
       store.saveRecipe({
         domain,
@@ -356,6 +354,7 @@ async function processNode(node: ResearchNode, ctx: NodeContext): Promise<void> 
         yieldChars: next.yieldChars,
         fallbackStreak: next.fallbackStreak,
         wins: next.wins,
+        fingerprint: next.fingerprint,
         updatedAt: Date.now(),
       });
     }
