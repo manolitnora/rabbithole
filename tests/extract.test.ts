@@ -164,3 +164,27 @@ describe('full extract with recipe', () => {
     assert.equal(domainOf('not a url'), '');
   });
 });
+
+describe('challenge rejection', () => {
+  const CHALLENGE_PAGE = pageWith(`
+<div id="challenge-running">Checking your browser before accessing target.example ... Click here if you are not automatically redirected after 5 seconds.</div>
+<script src="/cdn-cgi/challenge-platform/h/b/orchestrate/jsch/v1"></script>`,
+    'Just a moment...');
+
+  test('an interstitial yields nothing instead of challenge text', () => {
+    const ex = extractGeneric(CHALLENGE_PAGE);
+    assert.equal(ex.yieldChars, 0);
+    assert.equal(ex.content, '');
+    assert.equal(ex.fingerprint, null);
+  });
+
+  test('a recipe cannot extract from an interstitial either', () => {
+    const ex = extract(CHALLENGE_PAGE, { selector: '#challenge-running', yieldChars: 0, fallbackStreak: 0, wins: 3 });
+    assert.equal(ex.yieldChars, 0);
+    assert.equal(ex.usedRecipe, false);
+  });
+
+  test('a normal page is not mistaken for a challenge', () => {
+    assert.ok(extractGeneric(ARTICLE_PAGE).yieldChars > 0);
+  });
+});

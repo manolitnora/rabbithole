@@ -74,6 +74,23 @@ const CHROME_SELECTORS = 'script, style, nav, footer, header, aside, noscript, t
 
 const CANDIDATE_TAGS = 'article, main, section, div, td, body';
 
+/** Cloudflare / anti-bot interstitials are HTTP 200 HTML, not articles. */
+function isBrowserChallenge(title: string, content: string): boolean {
+  const t = title.trim().toLowerCase();
+  if (t === 'just a moment...' || t === 'just a moment') return true;
+  const c = content.toLowerCase();
+  return (
+    c.includes('checking your browser before accessing')
+    || c.includes('cf-browser-verification')
+    || c.includes('cdn-cgi/challenge-platform')
+  );
+}
+
+function rejectChallenge(ex: Extraction): Extraction {
+  if (!isBrowserChallenge(ex.title, ex.content)) return ex;
+  return { title: ex.title, content: '', links: [], selector: null, usedRecipe: false, yieldChars: 0, fingerprint: null, method: 'generic' };
+}
+
 function isHidden(el: Element): boolean {
   for (let current: Element | null = el; current; current = current.parentElement) {
     if (current.matches('[hidden], [inert], [aria-hidden="true"]')
@@ -262,7 +279,7 @@ export function extractGeneric(html: string): Extraction {
   const content = (picked?.el.textContent ?? body.textContent ?? '')
     .replace(/\s+/g, ' ')
     .trim();
-  return {
+  return rejectChallenge({
     title,
     content,
     links,
@@ -271,7 +288,7 @@ export function extractGeneric(html: string): Extraction {
     yieldChars: content.length,
     fingerprint: picked ? fingerprint(picked.el) : null,
     method: 'generic',
-  };
+  });
 }
 
 /**
@@ -291,8 +308,8 @@ export function extract(html: string, recipe: RecipeLike | null, config: Partial
   const take = (el: Element, selector: string, method: 'recipe' | 'adaptive'): Extraction | null => {
     const content = (el.textContent ?? '').replace(/\s+/g, ' ').trim();
     if (content.length < cfg.minRecipeYield) return null;
-    return { title: generic.title, content, links: collectLinks(el), selector,
-      usedRecipe: true, yieldChars: content.length, fingerprint: fingerprint(el), method };
+    return rejectChallenge({ title: generic.title, content, links: collectLinks(el), selector,
+      usedRecipe: true, yieldChars: content.length, fingerprint: fingerprint(el), method });
   };
   try {
     const matches = body.querySelectorAll(recipe.selector);
