@@ -1,6 +1,6 @@
 # rabbithole
 
-Privacy-tunneled recursive research engine that **compounds**: feed it a topic, get back a knowledge DAG that persists in SQLite — the next dive skips what's done, revalidates what's stale, and expands only the frontier. The dive makes zero LLM calls; [JEV evidence review](#optional-jev-evidence-review) is optional and separately approved.
+Privacy-tunneled recursive research engine that **compounds**: feed it a topic, get back a knowledge DAG that persists in SQLite — the next dive skips what's done, revalidates what's stale, and expands only the frontier. The dive is deterministic by default; set `llmBaseUrl` to use a local model for sub-topic extraction. [JEV evidence review](#optional-jev-evidence-review) is optional and separately approved.
 
 ## What it does
 
@@ -81,6 +81,8 @@ await dive('topic', {
   maxRevalidate: 5,         // max refetch-based staleness checks per run
   storePath: null,          // null → .rabbithole/state.db (override via RH_HOME)
   mode: 'dive',             // 'kill' = search and fetch only, no mitosis
+  llmBaseUrl: undefined,    // optional local endpoint for LLM sub-topics
+  llmModel: 'mlx-community/Llama-3.2-3B-Instruct-4bit',
 });
 ```
 

@@ -5,7 +5,7 @@
  *   1. Ignition: topic provided
  *   2. Search: Brave Search finds relevant pages
  *   3. Tunnel: fetch content with jitter + privacy + per-domain recipes
- *   4. Extract: pull sub-topics from content (deterministic bigrams)
+ *   4. Extract: pull sub-topics from content (bigrams, or a local LLM when configured)
  *   5. Mitosis: spawn child nodes for sub-topics
  *   6. Repeat until MAX_DEPTH, MAX_NODES, or convergence
  *   7. Persist: every node lands in SQLite; the next dive resumes
@@ -24,7 +24,8 @@
  *   MAX_CONCURRENT: 3  (enforced SOLELY by tunnel — engine keeps no counter)
  *   JITTER:         2-5s (anti-bot behavior)
  *
- * Zero LLM calls anywhere in this file.
+ * No LLM calls by default. When `llmBaseUrl` is set, sub-topic extraction uses
+ * that local endpoint and falls back to the deterministic heuristic on failure.
  */
 
 import { createHash } from 'node:crypto';
@@ -65,6 +66,10 @@ export interface RabbitHoleConfig {
   storePath: string | null;
   /** 'kill' runs search and fetch only; 'dive' expands sub-topics. */
   mode: 'kill' | 'dive';
+  /** Optional OpenAI-compatible endpoint for LLM sub-topic extraction. */
+  llmBaseUrl?: string;
+  /** Model ID sent to the LLM endpoint. */
+  llmModel?: string;
 }
 
 /** Per-call options. `searchQuery` anchors the root search in a focused phrase
@@ -107,6 +112,8 @@ const DEFAULT_CONFIG: RabbitHoleConfig = {
   maxRevalidate: 5,
   storePath: null,
   mode: 'dive',
+  llmBaseUrl: undefined,
+  llmModel: 'mlx-community/Llama-3.2-3B-Instruct-4bit',
 };
 
 // ═══════════════════════════════════════════════════════════════════
@@ -126,10 +133,82 @@ function sha256(s: string): string {
 }
 
 // ═══════════════════════════════════════════════════════════════════
-// SUB-TOPIC EXTRACTION — deterministic bigram heuristic (unchanged)
+// SUB-TOPIC EXTRACTION — bigram heuristic, optional local LLM
 // ═══════════════════════════════════════════════════════════════════
 
-function extractSubTopics(content: string, parentTopic: string, limit = 3): string[] {
+const CHROME_TOKENS = new Set([
+  'span', 'class', 'div', 'href', 'wiki', 'jump', 'content', 'pages', 'using',
+  'click', 'share', 'listen', 'cookie', 'privacy', 'navigation', 'footer',
+  'header', 'script',
+]);
+
+function isCleanWord(w: string): boolean {
+  return w.length >= 4 && /^[a-z]+$/.test(w) && !CHROME_TOKENS.has(w);
+}
+
+/** True iff the phrase is 2-5 alphabetic words, each length>=4, no chrome. */
+export function isValidTopic(phrase: string): boolean {
+  const words = phrase.trim().toLowerCase().split(/\s+/);
+  return words.length >= 2 && words.length <= 5 && words.every(isCleanWord);
+}
+
+/**
+ * LLM-guided sub-topic extraction through a local OpenAI-compatible endpoint
+ * (for example rapid-mlx on localhost:8000). Falls back to the bigram
+ * heuristic when no endpoint is configured, the call fails, or the model
+ * returns nothing usable.
+ */
+async function extractSubTopicsLLM(
+  cfg: RabbitHoleConfig,
+  content: string,
+  parentTopic: string,
+  limit = 3,
+): Promise<string[]> {
+  if (!cfg.llmBaseUrl) return extractSubTopics(content, parentTopic, limit);
+
+  const prompt = [
+    `You are a research navigator. Given a page about "${parentTopic}", identify exactly ${limit} specific sub-topics worth exploring next.`,
+    `Rules: each sub-topic must be 2-5 words, concrete and distinct, not already covered by "${parentTopic}". Never emit HTML, CSS, wiki chrome, or navigation labels.`,
+    `Return ONLY a JSON array of strings. No explanation. Example: ["memory consolidation", "replay buffers", "episodic encoding"]`,
+    ``,
+    `Page content (first 1500 chars):`,
+    content.slice(0, 1500),
+  ].join('\n');
+
+  try {
+    const res = await fetch(`${cfg.llmBaseUrl}/chat/completions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer not-needed' },
+      body: JSON.stringify({
+        model: cfg.llmModel,
+        messages: [{ role: 'user', content: prompt }],
+        max_tokens: 120,
+        temperature: 0.3,
+      }),
+      signal: AbortSignal.timeout(8000),
+    });
+    if (!res.ok) throw new Error(`LLM ${res.status}`);
+    const data = await res.json() as { choices?: Array<{ message?: { content?: string } }> };
+    const raw = data.choices?.[0]?.message?.content ?? '';
+    const match = raw.match(/\[([^\]]+)\]/);
+    if (!match) throw new Error('no array in response');
+    const topics = JSON.parse(`[${match[1]}]`) as string[];
+    const cleaned = topics
+      .map((t: string) => t.trim().toLowerCase())
+      .filter((t: string) => isValidTopic(t) && !researchedTopics.has(t));
+    if (cleaned.length > 0) return cleaned.slice(0, limit);
+    return extractSubTopics(content, parentTopic, limit);
+  } catch {
+    return extractSubTopics(content, parentTopic, limit);
+  }
+}
+
+/**
+ * Extract sub-topics from content using a tightened bigram heuristic.
+ * Rejects HTML/chrome tokens (span, class, pages using, ...). Both words
+ * must be alphabetic and length>=4. If nothing real survives, returns [].
+ */
+export function extractSubTopics(content: string, parentTopic: string, limit = 3): string[] {
   const stopwords = new Set([
     'the', 'a', 'an', 'is', 'are', 'was', 'were', 'be', 'been', 'being',
     'have', 'has', 'had', 'do', 'does', 'did', 'will', 'would', 'could',
@@ -142,23 +221,22 @@ function extractSubTopics(content: string, parentTopic: string, limit = 3): stri
 
   const parentWords = new Set(parentTopic.toLowerCase().split(/\s+/));
 
-  // Extract 2-grams (bigrams) as candidate topics
   const words = content.toLowerCase()
-    .replace(/[^a-z0-9\s]/g, ' ')
+    .replace(/[^a-z\s]/g, ' ')
     .split(/\s+/)
-    .filter(w => w.length > 3 && !stopwords.has(w));
+    .filter(w => isCleanWord(w) && !stopwords.has(w));
 
   const bigramCounts = new Map<string, number>();
   for (let i = 0; i < words.length - 1; i++) {
-    const bigram = `${words[i]} ${words[i + 1]}`;
-    // Skip if both words are in parent topic
-    if (parentWords.has(words[i]) && parentWords.has(words[i + 1])) continue;
+    const a = words[i];
+    const b = words[i + 1];
+    if (parentWords.has(a) && parentWords.has(b)) continue;
+    const bigram = `${a} ${b}`;
     bigramCounts.set(bigram, (bigramCounts.get(bigram) ?? 0) + 1);
   }
 
-  // Sort by frequency, take top N that aren't already researched
   return Array.from(bigramCounts.entries())
-    .filter(([bg, count]) => count >= 2 && !researchedTopics.has(bg))
+    .filter(([bg, count]) => count >= 2 && isValidTopic(bg) && !researchedTopics.has(bg))
     .sort((a, b) => b[1] - a[1])
     .slice(0, limit)
     .map(([bg]) => bg);
@@ -286,7 +364,7 @@ async function processNode(node: ResearchNode, ctx: NodeContext): Promise<void> 
 
     // Extract sub-topics for deeper research
     // Kill mode: never extract sub-topics or spawn children.
-    const subTopics = cfg.mode === 'kill' ? [] : extractSubTopics(combinedContent, node.topic);
+    const subTopics = cfg.mode === 'kill' ? [] : await extractSubTopicsLLM(cfg, combinedContent, node.topic);
 
     // Update in-memory DAG
     updateNodeWithResults(node.id, storedContent, sources, subTopics);
