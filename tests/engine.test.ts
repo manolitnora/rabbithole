@@ -251,4 +251,22 @@ describe('dive — compounding semantics', () => {
     assert.ok(store.getLastRun('topic zeta'));
     store.close();
   });
+
+  test('searchQuery anchors the root search while the topic stays the root', async () => {
+    const storePath = tempStorePath();
+    const queries: string[] = [];
+    const deps: EngineDeps = {
+      search: async (query: string) => {
+        queries.push(query);
+        return [{ title: 'result', url: 'https://site.test/anchored', description: 'desc' }];
+      },
+      fetchPage: async (url: string) => okResult(url, 'short prose without repeated bigrams'),
+    };
+
+    const topic = 'grounding context about Vault token renewal and policy';
+    const run = await dive(topic, { storePath, maxNodes: 1, searchQuery: 'vault token renewal' }, deps);
+    assert.deepEqual(queries, ['vault token renewal']);
+    assert.equal(run.nodes[0].topic, topic);
+    assert.equal(run.nodesComplete, 1);
+  });
 });

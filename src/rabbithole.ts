@@ -65,6 +65,12 @@ export interface RabbitHoleConfig {
   storePath: string | null;
 }
 
+/** Per-call options. `searchQuery` anchors the root search in a focused phrase
+ *  while `topic` keeps its grounding context for sub-topic extraction. */
+export interface DiveOptions extends Partial<RabbitHoleConfig> {
+  searchQuery?: string;
+}
+
 export interface DiveResult {
   topic: string;
   nodesExplored: number;
@@ -201,7 +207,7 @@ async function processNode(node: ResearchNode, ctx: NodeContext): Promise<void> 
 
   try {
     // Search for the topic
-    const searchResults = await deps.search(node.topic, cfg.searchResultsPerQuery);
+    const searchResults = await deps.search(node.searchQuery ?? node.topic, cfg.searchResultsPerQuery);
 
     if (searchResults.length === 0) {
       markFailed(node.id);
@@ -376,10 +382,11 @@ function rebuildDagFromStore(rows: StoredNode[]): Map<string, string> {
  */
 export async function dive(
   topic: string,
-  options?: Partial<RabbitHoleConfig>,
+  options?: DiveOptions,
   deps?: EngineDeps,
 ): Promise<DiveResult> {
-  const cfg: RabbitHoleConfig = { ...DEFAULT_CONFIG, ...options };
+  const { searchQuery, ...cfgOverrides } = options ?? {};
+  const cfg: RabbitHoleConfig = { ...DEFAULT_CONFIG, ...cfgOverrides };
   configureTunnel({ minJitter: cfg.minJitter, maxJitter: cfg.maxJitter, maxConcurrent: cfg.maxConcurrent });
 
   const search = deps?.search ?? braveSearch;
@@ -415,7 +422,7 @@ export async function dive(
         }
       }
     } else {
-      root = createRootNode(topic);
+      root = searchQuery ? createRootNode(topic, searchQuery) : createRootNode(topic);
     }
 
     if (!root) {
