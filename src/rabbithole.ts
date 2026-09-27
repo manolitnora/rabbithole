@@ -191,7 +191,9 @@ async function extractSubTopicsLLM(
     if (!res.ok) throw new Error(`LLM ${res.status}`);
     const data = await res.json() as { choices?: Array<{ message?: { content?: string } }> };
     const raw = data.choices?.[0]?.message?.content ?? '';
-    const topics = JSON.parse(raw.trim()) as string[];
+    const trimmed = raw.trim();
+    const fenced = /^```(?:json)?\r?\n([\s\S]*?)\r?\n```$/.exec(trimmed);
+    const topics = JSON.parse((fenced ? fenced[1] : trimmed).trim()) as string[];
     if (!Array.isArray(topics)) throw new Error('response is not an array');
     const cleaned = [...new Set(topics
       .map((t: string) => t.trim().toLowerCase().replace(/\s+/g, ' ')))]

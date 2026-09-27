@@ -88,6 +88,16 @@ test('a configured endpoint drives mitosis with LLM sub-topics', async t => {
   assert.ok(topics.includes('replay buffers'));
 });
 
+for (const tag of ['', 'json']) {
+  test(`fenced array with ${tag || 'no'} language tag is accepted`, async t => {
+    const base = await llmServer(t, ` \n\`\`\`${tag}\n["memory consolidation", "replay buffers"]\n\`\`\`\n `, { expectedCalls: 1 });
+    const run = await dive('topic fenced', {
+      storePath: tempStorePath(t), maxNodes: 1, maxDepth: 0, llmBaseUrl: base, llmModel: 'test-model',
+    }, fakeWeb('plain page prose'));
+    assert.deepEqual(run.nodes[0].subTopics, ['memory consolidation', 'replay buffers']);
+  });
+}
+
 test('LLM topics are canonicalized and deduplicated in order before the limit', async t => {
   const base = await llmServer(t, JSON.stringify([
     ' MEMORY  consolidation ', 'memory consolidation', 'Memory\tConsolidation',
@@ -116,6 +126,8 @@ const fallbackCases = [
   { name: 'invalid phrases', reply: '["span class", "no"]' },
   { name: 'non-array output', reply: '{"topic":"memory consolidation"}' },
   { name: 'trailing garbage', reply: '["memory consolidation"] trailing garbage' },
+  { name: 'fenced array followed by trailing text', reply: '```json\n["memory consolidation"]\n```\ntrailing text' },
+  { name: 'trailing garbage inside a fence', reply: '```json\n["memory consolidation"] trailing garbage\n```' },
   { name: 'prose-wrapped array', reply: 'Here are topics: ["memory consolidation"]' },
   { name: 'all topics already researched', reply: '["memory consolidation"]', seed: true },
   { name: 'double-spaced researched topic', reply: '["MEMORY  consolidation"]', seed: true },
