@@ -243,4 +243,17 @@ describe('challenge rejection', () => {
     const html = pageWith('<main>checking your browser before accessing</main>');
     assert.equal(extractGeneric(html).content, 'checking your browser before accessing');
   });
+
+  test('ordinary elements with challenge-like names do not blank an article', () => {
+    for (const structure of [
+      '<div class="challenges">',
+      '<div id="challenge-list">',
+      '<section class="challenge-card">',
+    ]) {
+      const html = pageWith(`${structure}<p>${PROSE}</p></div>`, 'Study Notes');
+      const ex = extractGeneric(html);
+      assert.ok(ex.yieldChars > 0, `${structure} must not reject an article`);
+      assert.ok(ex.content.includes('Episodic memory'));
+    }
+  });
 });

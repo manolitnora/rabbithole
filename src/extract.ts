@@ -74,16 +74,28 @@ const CHROME_SELECTORS = 'script, style, nav, footer, header, aside, noscript, t
 
 const CANDIDATE_TAGS = 'article, main, section, div, td, body';
 
+/** Cloudflare interstitial id and class tokens. Matched as whole tokens so an
+ *  ordinary element like `class="challenges"` or `id="challenge-list"` is
+ *  not mistaken for a challenge page. */
+const CHALLENGE_TOKENS = new Set([
+  'cf-browser-verification', 'cf-challenge', 'cf-im-under-attack', 'cf-turnstile',
+  'challenge-running', 'challenge-form', 'challenge-stage', 'challenge-body',
+  'challenge-error', 'challenge-error-text', 'challenge-spinner', 'challenge-header',
+  'turnstile',
+]);
+
 function hasChallengeStructure(document: Document): boolean {
-  return Array.from(document.querySelectorAll('[id], [class]')).some(el =>
-    /challenge|cf-browser-verification|turnstile/i.test(`${el.id} ${el.getAttribute('class') ?? ''}`))
-    || Array.from(document.querySelectorAll('script[src], iframe[src]')).some(el => {
-      try {
-        const url = new URL(el.getAttribute('src') ?? '', 'https://example.invalid');
-        return url.hostname === 'challenges.cloudflare.com'
-          || /^\/cdn-cgi\/challenge-platform(?:\/|$)/.test(url.pathname);
-      } catch { return false; }
-    });
+  const hasToken = Array.from(document.querySelectorAll('[id], [class]')).some(el =>
+    `${el.id} ${el.getAttribute('class') ?? ''}`.toLowerCase().split(/\s+/)
+      .some(token => CHALLENGE_TOKENS.has(token)));
+  if (hasToken) return true;
+  return Array.from(document.querySelectorAll('script[src], iframe[src]')).some(el => {
+    try {
+      const url = new URL(el.getAttribute('src') ?? '', 'https://example.invalid');
+      return url.hostname === 'challenges.cloudflare.com'
+        || /^\/cdn-cgi\/challenge-platform(?:\/|$)/.test(url.pathname);
+    } catch { return false; }
+  });
 }
 
 function rejectChallenge(ex: Extraction): Extraction {
