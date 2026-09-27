@@ -12,7 +12,12 @@
 
 export { braveSearch, type SearchResult } from './brave.js';
 export { tunnel, tunnelBatch, configureTunnel, getTunnelStats, type TunnelResult, type TunnelConfig } from './tunnel.js';
-export { extractGeneric, extract, nextRecipe, domainOf, type Extraction, type RecipeLike } from './extract.js';
+export { extractGeneric, extract, nextRecipe, domainOf, type Extraction, type RecipeLike, type ElementFingerprint } from './extract.js';
+export {
+  previewJevResearch, evaluateJevResearch,
+  type JevResearchPreview, type JevResearchApproval, type JevResearchHost,
+  type JevResearchResult, type JevResearchReceipt, type JevResearchAnswer,
+} from './research-advisory.js';
 export { Store, defaultStorePath, normalizeTopic, type StoredNode, type Recipe, type RunDelta } from './store.js';
 export { dive, type RabbitHoleConfig, type DiveResult, type EngineDeps } from './rabbithole.js';
 export {
