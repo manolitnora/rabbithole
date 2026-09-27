@@ -46,19 +46,7 @@ src/
 
 ### store.ts
 
-Tables:
-
-```sql
-nodes(id TEXT PRIMARY KEY, root_topic TEXT NOT NULL, parent_id TEXT,
-      topic TEXT NOT NULL UNIQUE, status TEXT NOT NULL, depth INTEGER NOT NULL,
-      content_hash TEXT, content TEXT, sources TEXT/*JSON*/, subtopics TEXT/*JSON*/,
-      fetch_error TEXT, created_at INTEGER, updated_at INTEGER);
-recipes(domain TEXT PRIMARY KEY, selector TEXT, yield_chars INTEGER,
-        fallback_streak INTEGER DEFAULT 0, wins INTEGER DEFAULT 0,
-        updated_at INTEGER);
-runs(id TEXT PRIMARY KEY, root_topic TEXT, started_at INTEGER,
-     finished_at INTEGER, delta TEXT/*JSON*/);
-```
+The authoritative SQLite schema and migrations are in [src/store.ts](../../../src/store.ts).
 
 Topic uniqueness across runs = cross-run dedup. dag.ts stays a pure in-memory
 working set; store is the durable layer bridged in `rabbithole.ts`
@@ -66,14 +54,7 @@ working set; store is the durable layer bridged in `rabbithole.ts`
 
 ### extract.ts
 
-- Parse with `linkedom.parseHTML`.
-- Strip script/style/nav/footer/header/aside.
-- Candidate containers scored by `textLen / (1 + linkTextLen)`; winner must
-  beat body-generic extraction by ≥1.5× to be adopted.
-- Recipe = winning selector (`tag#id` or `tag.class`) persisted per domain.
-- Heal rule: recipe yield < 200 chars → generic pipeline this run;
-  generic ≥ 2× recipe yield twice consecutively → recipe replaced
-  (`fallback_streak` counter). Deterministic.
+See [When a site changes](../../../README.md#when-a-site-changes) for the current recipe, relocation, healing, and hidden-content rules.
 
 ### Resumable dive
 
@@ -90,11 +71,11 @@ working set; store is the durable layer bridged in `rabbithole.ts`
 ### Defect fixes riding along (required by honest delta report)
 
 Full Chrome UA string (truncated UA was itself a fingerprint); error strings
-propagated into `TunnelResult.error` / `nodes.fetch_error`; retry once on
-429/5xx/network with jitter backoff; single concurrency counter in tunnel
+propagated into `TunnelResult.error` / `nodes.fetch_error`; fetch policy documented in
+[Bounded fetching](../../../README.md#bounded-fetching); single concurrency counter in tunnel
 (was double-counted with processNode).
 
-## Testing (local, no network)
+## Testing
 
 - store: round-trip, unique-topic constraint, staleness query, runs delta.
 - extract: canned HTML incl. malformed; script/style stripped; container
@@ -102,7 +83,8 @@ propagated into `TunnelResult.error` / `nodes.fetch_error`; retry once on
 - rabbithole: injected fake search/tunnel drives full loop offline —
   run 1 explores, run 2 skips everything (delta), mutated page hash triggers
   re-research of exactly one node.
-- Existing 11 DAG tests untouched and green.
+
+For current test commands and transport scope, see [Test](../../../README.md#test).
 
 ## Verification
 

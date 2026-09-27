@@ -1,6 +1,6 @@
 # rabbithole
 
-Privacy-tunneled recursive research engine that **compounds**: feed it a topic, get back a knowledge DAG that persists in SQLite — the next dive skips what's done, revalidates what's stale, and expands only the frontier. Zero LLM calls.
+Privacy-tunneled recursive research engine that **compounds**: feed it a topic, get back a knowledge DAG that persists in SQLite — the next dive skips what's done, revalidates what's stale, and expands only the frontier. The dive makes zero LLM calls; [JEV evidence review](#optional-jev-evidence-review) is optional and separately approved.
 
 ## What it does
 
@@ -87,17 +87,18 @@ await dive('topic', {
 
 - **Topics are durable keys.** A topic researched under any root, in any run, is never expanded again — cross-run dedup lives in SQLite (`UNIQUE(topic)`), not in memory.
 - **Staleness is bounded.** On `resume`, complete nodes older than `stalenessTtlMs` are revalidated oldest-first, at most `maxRevalidate` refetches per run. A page whose content hash changed re-enters research; an unchanged page just has its timestamp touched.
-- **Extraction heals itself.** Per domain, the winning container selector is stored as a recipe. When a recipe's yield collapses (<200 chars), the generic density pipeline takes over; after two consecutive dominant generic wins the recipe is rewritten. No LLM involved. The recipe also stores a structural fingerprint of the winning container, so a renamed element is relocated before the heal path runs.
+- **Extraction heals itself.** Per-domain recipes persist in SQLite; see [When a site changes](#when-a-site-changes) for relocation and healing.
 - **The frontier survives crashes.** Pending nodes are flushed to the store the moment they're spawned, so an interrupted run resumes where it left off.
 
 ## When a site changes
 
-- **Recipes relocate by structure.** Each recipe stores a fingerprint of the winning container: tag, semantic attributes (`role`, `itemprop`, `data-testid`), classes, and parent and child tags. When the stored selector stops matching, the extractor scores every candidate by similarity and uses the new location only when one candidate clearly wins. Ties fall back to generic extraction, so a longer distractor cannot claim the article.
-- **Hidden elements are excluded from prose.** `[hidden]`, `[inert]`, `[aria-hidden="true"]`, and inline `display:none` are stripped before scoring. This reduces injection surface; it is not a complete prompt-injection defense. Treat page content as untrusted data.
+- **Recipes relocate by structure.** Each recipe stores a fingerprint of the winning container: tag, semantic attributes (`role`, `itemprop`, `data-testid`), classes, and parent and child tags. A unique selector match with an unchanged fingerprint is reused immediately if its yield is sufficient. When the selector stops matching uniquely or its fingerprint changes, candidates compete by structural similarity, including any reused selector. Only a clear winner is accepted; ties and weak matches fall back to generic extraction. Successful relocation updates the stored selector and fingerprint. Legacy databases migrate automatically; recipes without fingerprints can still use their selectors.
+- **Generic extraction heals failed recipes.** If recipe reuse and relocation fail, the generic density pipeline takes over. With the default settings, two consecutive generic yields of at least 200 characters and at least twice the saved recipe yield replace the recipe.
+- **Hidden elements are excluded from prose.** `[hidden]`, `[inert]`, `[aria-hidden="true"]`, and inline `display:none` or `visibility:hidden` are excluded before scoring. A hidden body or ancestor yields empty extraction and no learned fingerprint. Stylesheets and computed visibility are not evaluated. This reduces injection surface; it is not a complete prompt-injection defense. Treat page content as untrusted data.
 
 ## Bounded fetching
 
-HTTP 429 and 503 retry up to `retries` (default 1) with `Retry-After` honored. A requested wait longer than `maxRetryDelayMs` fails the request instead of retrying early. Response bodies larger than `maxResponseBytes` fail. Concurrency stays inside the tunnel.
+HTTP 429 and 5xx responses and network errors retry up to `retries` (default 1). For retryable HTTP responses, `Retry-After` accepts seconds or an HTTP date; absent or unparseable values use jitter backoff. An HTTP retry delay longer than `maxRetryDelayMs` fails the request instead of retrying early. Failed HTTP response bodies are cancelled. Response bodies larger than `maxResponseBytes` fail without retrying. Concurrency stays inside the tunnel.
 
 ```typescript
 import { configureTunnel } from 'rabbithole';
@@ -108,6 +109,8 @@ configureTunnel({
   maxResponseBytes: 2_000_000,
 });
 ```
+
+`configureTunnel` rejects invalid numeric settings: jitter bounds, retries, and retry-delay budgets must be nonnegative safe integers; timeout, concurrency, and response-byte limits must be positive safe integers. The minimum jitter cannot exceed the maximum, and retries cannot exceed five.
 
 ## Optional JEV evidence review
 
@@ -124,7 +127,7 @@ const pending = await evaluateJevResearch(result.topic, result.nodes);
 console.log(pending.status); // 'not_approved'. No credentials read, no request sent.
 ```
 
-To transmit, the calling host supplies a `JevResearchHost` as the third argument to `evaluateJevResearch`. Its `approval` must independently attest `authorityFree: true` and match the preview's `sourceHash`, `exportHash`, `disclosureHash`, and `requestHash`. The request hash binds the questions as well as the evidence. Do not generate approval inside a model prompt, and never infer it from an API key.
+To transmit, the calling host supplies a `JevResearchHost` as the third argument to `evaluateJevResearch`. Its `approval` must independently attest `authorityFree: true` and match the preview's `sourceHash`, `exportHash`, `disclosureHash`, and `requestHash`. The request hash binds the questions as well as the evidence. Keep host configuration and approval out of model-callable arguments. Do not generate approval inside a model prompt, and never infer it from an API key.
 
 After approval, the client reads `JEV_API_KEY`, or calls the host's `getApiKey` callback. It sends one request to `https://api.typesafe.ai/v1/systemone`, with no retries and no redirects. Changed evidence requires a new approval.
 
@@ -143,7 +146,7 @@ Get a key at [brave.com/search/api](https://brave.com/search/api/). Free tier: 2
 ## Test
 
 ```bash
-npm test   # 72 tests — DAG, store, extraction, tunnel transport, JEV gate, integration (no network calls)
+npm test   # Local HTTP servers + SQLite; synthetic JEV transport, no external service calls
 npx tsx live-test.mts   # live integration: full compounding dive ×2 via keyless Wikipedia search
 npx tsx smoke.mts   # live 2-run web smoke via Brave (requires BRAVE_API_KEY)
 ```
