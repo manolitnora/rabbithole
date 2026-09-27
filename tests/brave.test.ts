@@ -73,3 +73,65 @@ test('keyless braveSearch uses the HTML fallback', async () => {
 test('fallback failure returns an empty list instead of throwing', () => {
   assert.deepEqual(braveSearchHTML('anything', 5, () => { throw new Error('curl missing'); }), []);
 });
+
+test('API success preserves results and request options without fetching HTML', async (t) => {
+  const expected = [{ title: 'API result', url: 'https://example.test/api', description: 'API description' }];
+  const api = t.mock.method(globalThis, 'fetch', async (input: string | URL | Request, init?: RequestInit) => {
+    const url = new URL(String(input));
+    assert.equal(url.searchParams.get('q'), 'a & b');
+    assert.equal(url.searchParams.get('count'), '20');
+    assert.equal(new Headers(init?.headers).get('X-Subscription-Token'), 'test-key');
+    return Response.json({ web: { results: expected } });
+  });
+  assert.deepEqual(await braveSearch('a & b', 25, 'test-key', () => {
+    assert.fail('successful API must not fetch HTML');
+  }), expected);
+  assert.equal(api.mock.callCount(), 1);
+});
+
+for (const failure of ['empty', '401', '429', '503', 'network'] as const) {
+  test(`API ${failure} falls back with bounded API attempts`, async (t) => {
+    const api = t.mock.method(globalThis, 'fetch', async () => {
+      if (failure === 'network') throw new Error('connection reset');
+      return failure === 'empty'
+        ? Response.json({ web: { results: [] } })
+        : new Response('', { status: Number(failure) });
+    });
+    let htmlCalls = 0;
+    const results = await braveSearch('a & b', 1, 'test-key', url => {
+      htmlCalls++;
+      assert.equal(new URL(url).searchParams.get('q'), 'a & b');
+      return FIXTURE;
+    });
+    assert.equal(results.length, 1);
+    assert.equal(results[0].url, 'https://example.test/first');
+    assert.equal(htmlCalls, 1);
+    assert.equal(api.mock.callCount(), ['429', '503', 'network'].includes(failure) ? 2 : 1);
+  });
+}
+
+for (const status of [429, 503]) {
+  test(`API recovers after ${status} with exactly one retry and no HTML fetch`, async (t) => {
+    let calls = 0;
+    const expected = [{ title: 'Recovered', url: 'https://example.test/recovered', description: '' }];
+    t.mock.method(globalThis, 'fetch', async () => ++calls === 1
+      ? new Response('', { status })
+      : Response.json({ web: { results: expected } }));
+    assert.deepEqual(await braveSearch('retry', 5, 'test-key', () => {
+      assert.fail('recovered API must not fetch HTML');
+    }), expected);
+    assert.equal(calls, 2);
+  });
+}
+
+test('missing environment key bypasses API and empty markup is safe', async (t) => {
+  const previous = process.env.BRAVE_API_KEY;
+  delete process.env.BRAVE_API_KEY;
+  t.after(() => {
+    if (previous === undefined) delete process.env.BRAVE_API_KEY;
+    else process.env.BRAVE_API_KEY = previous;
+  });
+  t.mock.method(globalThis, 'fetch', async () => { assert.fail('keyless search must bypass API'); });
+  assert.deepEqual(await braveSearch('keyless', 5, undefined, () => '<html></html>'), []);
+  assert.equal((await braveSearch('keyless', 1, undefined, () => FIXTURE))[0].title, 'First Result Title');
+});

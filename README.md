@@ -24,7 +24,7 @@ Four primitives:
 
 | Primitive | What it does |
 |---|---|
-| **Search** | Brave Search API — no tracking, no profiling, transient-failure retry |
+| **Search** | Brave Search — see [Environment](#environment) for API and keyless search |
 | **Tunnel** | Fetch with 2-5s jitter, concurrency limits, bounded 429/5xx retries with Retry-After, response size cap |
 | **Extract** | linkedom parsing + text-density scoring; per-domain recipes that persist and self-heal |
 | **DAG** | Directed Acyclic Graph — depth-limited, no duplicates, breadth-first, **persisted** |
@@ -138,6 +138,8 @@ Results are `not_approved`, `unavailable`, `abstained`, or `hypothesis`. Success
 
 ## Environment
 
+`BRAVE_API_KEY` is optional. With a key, search prefers the Brave API and retries once on HTTP 429, 5xx, or network errors. When the key is missing, the API fails, or it returns no results, search falls back to parsing `search.brave.com` result markup. The fallback requires `curl` on `PATH`; unavailable HTML or markup without recognized results yields an empty list.
+
 ```bash
 export BRAVE_API_KEY=your_brave_search_api_key
 ```
@@ -149,7 +151,7 @@ Get a key at [brave.com/search/api](https://brave.com/search/api/). Free tier: 2
 ```bash
 npm test   # Local HTTP servers + SQLite; synthetic JEV transport, no external service calls
 npx tsx live-test.mts   # live integration: full compounding dive ×2 via keyless Wikipedia search
-npx tsx smoke.mts   # live 2-run web smoke via Brave (requires BRAVE_API_KEY)
+npx tsx smoke.mts   # live 2-run web smoke via Brave; see Environment for setup
 ```
 
 ## Constraints
@@ -167,7 +169,7 @@ npx tsx smoke.mts   # live 2-run web smoke via Brave (requires BRAVE_API_KEY)
 ```
 rabbithole/
   src/
-    brave.ts       Brave Search API client with transient retry
+    brave.ts       Search client (see Environment for search modes)
     tunnel.ts      Privacy fetch: jitter, bounded retries, size cap
     extract.ts     linkedom extraction + recipe healing and relocation
     store.ts       node:sqlite persistence — nodes, recipes, runs

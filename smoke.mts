@@ -1,6 +1,6 @@
 /**
  * Live smoke: real dive x2 against the web via Brave + tunnel.
- * Run: npx tsx smoke.mts   (requires BRAVE_API_KEY)
+ * Run: npx tsx smoke.mts (see README.md#environment for search setup)
  */
 import { dive } from './src/rabbithole.js';
 

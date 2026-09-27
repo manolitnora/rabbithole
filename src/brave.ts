@@ -1,10 +1,7 @@
 /**
  * Brave Search Client — Privacy-first web search.
  *
- * Two modes:
- *   1. API mode: BRAVE_API_KEY returns structured JSON results (preferred)
- *   2. HTML mode: parses search.brave.com results when no key is set or the
- *      API fails, so a keyless environment can still run a dive
+ * Search modes and prerequisites: see README.md#environment.
  */
 
 import { execFileSync } from 'node:child_process';

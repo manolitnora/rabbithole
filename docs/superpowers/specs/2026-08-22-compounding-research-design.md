@@ -88,4 +88,4 @@ For current test commands and transport scope, see [Test](../../../README.md#tes
 
 ## Verification
 
-Suite green; live smoke (if BRAVE_API_KEY): tiny real dive ×2, show delta.
+Suite green; live smoke: tiny real dive ×2, show delta. See [Environment](../../../README.md#environment) for search prerequisites.
