@@ -18,6 +18,10 @@
 export interface ResearchNode {
   id: string;
   topic: string;
+  /** Optional override sent to search instead of `topic`. When the topic
+   *  carries grounding context, the literal string can poison web search;
+   *  searchQuery anchors the search while `topic` stays for downstream use. */
+  searchQuery?: string;
   parentId: string | null;
   depth: number;
   status: 'pending' | 'researching' | 'complete' | 'failed';
@@ -62,7 +66,7 @@ export function canAddNode(): boolean {
   return nodes.size < MAX_NODES;
 }
 
-export function createRootNode(topic: string): ResearchNode | null {
+export function createRootNode(topic: string, searchQuery?: string): ResearchNode | null {
   if (!canAddNode()) return null;
   const normalized = topic.toLowerCase().trim();
   if (topicIndex.has(normalized)) return null;
@@ -70,6 +74,7 @@ export function createRootNode(topic: string): ResearchNode | null {
   const node: ResearchNode = {
     id: crypto.randomUUID(),
     topic,
+    searchQuery,
     parentId: null,
     depth: 0,
     status: 'pending',
