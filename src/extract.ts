@@ -74,6 +74,36 @@ const CHROME_SELECTORS = 'script, style, nav, footer, header, aside, noscript, t
 
 const CANDIDATE_TAGS = 'article, main, section, div, td, body';
 
+/** Cloudflare interstitial id and class tokens. Matched as whole tokens so an
+ *  ordinary element like `class="challenges"` or `id="challenge-list"` is
+ *  not mistaken for a challenge page. */
+const CHALLENGE_TOKENS = new Set([
+  'cf-browser-verification', 'cf-challenge', 'cf-im-under-attack', 'cf-turnstile',
+  'challenge-running', 'challenge-form', 'challenge-stage', 'challenge-body',
+  'challenge-error', 'challenge-error-text', 'challenge-spinner', 'challenge-header',
+  'turnstile',
+]);
+
+function hasChallengeStructure(document: Document): boolean {
+  const hasToken = Array.from(document.querySelectorAll('[id], [class]')).some(el =>
+    `${el.id} ${el.getAttribute('class') ?? ''}`.toLowerCase().split(/\s+/)
+      .some(token => CHALLENGE_TOKENS.has(token)));
+  if (hasToken) return true;
+  return Array.from(document.querySelectorAll('script[src], iframe[src]')).some(el => {
+    try {
+      const url = new URL(el.getAttribute('src') ?? '', 'https://example.invalid');
+      return url.hostname === 'challenges.cloudflare.com'
+        || /^\/cdn-cgi\/challenge-platform(?:\/|$)/.test(url.pathname);
+    } catch { return false; }
+  });
+}
+
+function rejectChallenge(ex: Extraction): Extraction {
+  const title = ex.title.trim().toLowerCase();
+  if (ex.content.length >= 200 || (title !== 'just a moment...' && title !== 'just a moment')) return ex;
+  return { title: ex.title, content: '', links: [], selector: null, usedRecipe: false, yieldChars: 0, fingerprint: null, method: 'generic' };
+}
+
 function isHidden(el: Element): boolean {
   for (let current: Element | null = el; current; current = current.parentElement) {
     if (current.matches('[hidden], [inert], [aria-hidden="true"]')
@@ -251,7 +281,7 @@ export function extractGeneric(html: string): Extraction {
   // linkedom's .body getter throws when the document has no root element
   // (empty or fragment-only input) — bail out before touching it.
   const body = document.documentElement ? document.body : null;
-  if (!body || isHidden(body)) {
+  if (!body || isHidden(body) || hasChallengeStructure(document)) {
     return { title, content: '', links: [], selector: null, usedRecipe: false, yieldChars: 0, fingerprint: null, method: 'generic' };
   }
   // Harvest links from the full body BEFORE stripping chrome: nav/footer
@@ -262,7 +292,7 @@ export function extractGeneric(html: string): Extraction {
   const content = (picked?.el.textContent ?? body.textContent ?? '')
     .replace(/\s+/g, ' ')
     .trim();
-  return {
+  return rejectChallenge({
     title,
     content,
     links,
@@ -271,7 +301,7 @@ export function extractGeneric(html: string): Extraction {
     yieldChars: content.length,
     fingerprint: picked ? fingerprint(picked.el) : null,
     method: 'generic',
-  };
+  });
 }
 
 /**
