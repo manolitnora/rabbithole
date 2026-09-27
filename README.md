@@ -1,6 +1,6 @@
 # rabbithole
 
-Privacy-tunneled recursive research engine for LLM agents. Feed it a topic, get back a knowledge DAG. No tracking, no cloud dependencies beyond Brave Search API.
+Recursive research for LLM agents. Feed it a topic and get a knowledge DAG. Search uses Brave. Page extraction and persistence run locally. Optional JEV review sends only host-approved research excerpts to Typesafe.
 
 ## What it does
 
@@ -49,6 +49,53 @@ console.log(result.maxDepthReached);    // How deep the DAG went
 console.log(result.exitReason);         // 'convergence' | 'max_depth' | 'max_nodes'
 ```
 
+### Optional JEV evidence review
+
+JEV reviews relevance, conflicts, and coverage after a dive. Review is a separate step so a dive never silently sends its results to another service.
+
+```typescript
+import { dive, previewJevResearch, evaluateJevResearch } from 'rabbithole';
+
+const result = await dive('memory consolidation');
+const preview = previewJevResearch(result.topic, result.nodes);
+console.log(preview.serialized); // Exact request for host review. No network call.
+
+const pending = await evaluateJevResearch(result.topic, result.nodes);
+console.log(pending.status); // 'not_approved'. No credentials read or request sent.
+```
+
+To transmit, the calling host supplies a `JevResearchHost` as the third argument to `evaluateJevResearch`. Its `approval` must independently attest `authorityFree: true` and match the preview's `sourceHash`, `exportHash`, `disclosureHash`, and `requestHash`. The last hash binds the questions as well as the evidence. Do not generate approval inside a model prompt or infer it from an API key.
+
+After approval, the client reads `JEV_API_KEY`, or calls the host's `getApiKey` callback. It sends one request to `https://api.typesafe.ai/v1/systemone`, with no retries or redirects. Changed evidence requires a new approval. The Pi tool does not expose approval as a model-callable argument, and does not automatically invoke JEV.
+
+The request uses JEV's `choice` primitive for three research questions. It exports at most ten completed nodes and 1,500 characters per node. Omitted nodes and excerpted text are explicitly marked. URLs identify candidate sources, not proof of every statement. The full stable research projection is hashed before excerpting. Local IDs and timestamps are excluded.
+
+Results are `not_approved`, `unavailable`, `abstained`, or `hypothesis`. Successful exchanges retain full answer distributions, usage, request and response hashes, and the served model revision. Confidence measures distribution concentration, not factual truth. Review never changes the DAG, source status, or authority.
+
+### Adaptive extraction and bounded fetching
+
+These changes draw on [Scrapling's adaptive extraction and fetch policies](https://github.com/D4Vinci/Scrapling). They use the existing TypeScript parser and SQLite store, not a Python or browser runtime.
+
+- Recipes remember element structure as well as CSS selectors. If a selector breaks, a conservative similarity check can relocate the article. Ambiguous matches fall back to generic extraction.
+- Fingerprints persist across runs. Existing databases gain an additive recipe column without losing rows.
+- Hidden elements and common page navigation are excluded from prose. This is not a complete prompt-injection defense. Treat page content as untrusted data.
+- HTTP 429 and 503 receive at most two retries by default. `Retry-After` is honored. If the requested delay exceeds the budget, the request fails rather than retrying early.
+- Timeouts include response bodies. Bodies are limited to 2 MB by default. Challenge pages fail without browser escalation.
+
+```typescript
+import { configureTunnel } from 'rabbithole';
+
+configureTunnel({
+  maxRetries: 2,
+  retryDelayMs: 1000,
+  maxRetryDelayMs: 5000,
+  timeout: 30000,
+  maxResponseBytes: 2_000_000,
+});
+```
+
+This does not add Scrapling's browser fetchers, proxy rotation, cookie sessions, or full crawler framework. Existing SQLite resume remains in place. Concurrent `dive()` calls still share process-global state and are not supported.
+
 ### Individual primitives
 
 ```typescript
@@ -88,8 +135,11 @@ Get a key at [brave.com/search/api](https://brave.com/search/api/). Free tier: 2
 ## Test
 
 ```bash
-npm test   # 13 tests — DAG + tunnel config (no network calls)
+npm run build
+npm test
 ```
+
+Tests use isolated temporary databases, local HTTP servers, and synthetic JEV responses. They make no live JEV calls and do not establish production JEV compatibility. `dist/index.js` is the Pi tool's import target, so rebuild after source edits. Reload Pi to replace an already-cached module.
 
 ## Constraints
 
@@ -106,13 +156,15 @@ npm test   # 13 tests — DAG + tunnel config (no network calls)
 ```
 rabbithole/
   src/
-    brave.ts       Brave Search API client (54 lines)
-    tunnel.ts      Privacy fetch with jitter + extraction (160 lines)
-    dag.ts         Research DAG — nodes, edges, limits (180 lines)
-    rabbithole.ts  The engine — search, tunnel, extract, spawn (220 lines)
-    index.ts       Public API exports
-  tests/
-    rabbithole.test.ts   13 tests — DAG + config
+    brave.ts              Brave Search client
+    tunnel.ts             Bounded HTTP fetch and retry policy
+    extract.ts            Content selection and adaptive recipe recovery
+    store.ts              SQLite nodes, recipes, and runs
+    dag.ts                Research nodes and edges
+    rabbithole.ts         Search, fetch, extraction, and expansion
+    research-advisory.ts   Host-gated JEV research review
+    index.ts              Public API exports
+  tests/                  Parser, persistence, transport, and integration checks
 ```
 
 ## Part of the Verra Stack
