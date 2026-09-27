@@ -13,7 +13,7 @@ export {
   type JevResearchResult, type JevResearchReceipt, type JevResearchAnswer,
 } from './research-advisory.js';
 export { Store, defaultStorePath, normalizeTopic, type StoredNode, type Recipe, type RunDelta } from './store.js';
-export { dive, extractSubTopics, isValidTopic, type RabbitHoleConfig, type DiveOptions, type DiveResult, type EngineDeps } from './rabbithole.js';
+export { dive, type RabbitHoleConfig, type DiveOptions, type DiveResult, type EngineDeps } from './rabbithole.js';
 export {
   resetDAG, createRootNode, addChildNode, getStats, exportToMarkdown,
   getAllNodes, requeueNode, type ResearchNode, type DAGStats, MAX_DEPTH, MAX_NODES,
