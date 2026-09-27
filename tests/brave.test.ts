@@ -28,6 +28,36 @@ test('parseBraveHTML respects the result limit', () => {
   assert.equal(parseBraveHTML(FIXTURE, 1).length, 1);
 });
 
+test('parseBraveHTML decodes URL character references exactly once', () => {
+  const cases = [
+    ['&amp;', '&'],
+    ['&lt;', '<'],
+    ['&gt;', '>'],
+    ['&quot;', '"'],
+    ['&#x27;', "'"],
+    ['&#39;', "'"],
+    ['&nbsp;', '\u00a0'],
+    ['&#38;', '&'],
+    ['&#x26;', '&'],
+    ['&#X26;', '&'],
+    ['&#128640;', '🚀'],
+    ['&#x1F680;', '🚀'],
+    ['&amp;lt;', '&lt;'],
+    ['&unknown;', '&unknown;'],
+  ];
+  for (const [encoded, decoded] of cases) {
+    const html = FIXTURE.replace('https://example.test/first', `https://example.test/?value=${encoded}`);
+    assert.equal(parseBraveHTML(html, 1)[0].url, `https://example.test/?value=${decoded}`, encoded);
+  }
+});
+
+test('keyless fallback returns decoded query parameters', async () => {
+  const html = FIXTURE.replace('https://example.test/first', 'https://example.test/article?id=1&amp;page=2');
+  const results = await braveSearch('article', 1, '', () => html);
+  assert.equal(results[0].url, 'https://example.test/article?id=1&page=2');
+  assert.deepEqual([...new URL(results[0].url).searchParams], [['id', '1'], ['page', '2']]);
+});
+
 test('keyless braveSearch uses the HTML fallback', async () => {
   let requested = '';
   const results = await braveSearch('memory research', 5, '', (url) => {

@@ -8,6 +8,7 @@
  */
 
 import { execFileSync } from 'node:child_process';
+import { parseHTML } from 'linkedom';
 
 // ═══════════════════════════════════════════════════════════════════
 // TYPES
@@ -129,7 +130,9 @@ export function parseBraveHTML(html: string, count: number): SearchResult[] {
     if (!title) continue;
 
     const urlMatch = block.match(/href="(https?:\/\/(?!(?:cdn|imgs|tiles|search)\.(?:search\.)?brave\.com)[^"]*)"/i);
-    const url = urlMatch ? urlMatch[1] : '';
+    const url = urlMatch
+      ? parseHTML(`<a ${urlMatch[0]}></a>`).document.querySelector('a')!.getAttribute('href')!
+      : '';
 
     const blockText = stripHtml(block);
     const titleIdx = blockText.indexOf(title);
