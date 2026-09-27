@@ -86,6 +86,12 @@ await dive('topic', {
 });
 ```
 
+## Sub-topic extraction
+
+Without `llmBaseUrl`, extraction uses deterministic repeated bigrams and makes no LLM calls. This slice intentionally tightens that default heuristic: chrome tokens (including `privacy`, `cookie`, and `navigation`) and pure-number tokens no longer become research topics. Both bigram words must be alphabetic and at least four characters long, so some previously emitted topics are now excluded.
+
+Set `llmBaseUrl` to a local OpenAI-compatible API base URL to POST to its `/chat/completions` endpoint, using `llmModel`. The call has an eight-second timeout and requests a JSON array of strings. Each usable topic must have two to five alphabetic words of at least four characters each, contain no chrome tokens, and not already be researched. Unavailable endpoints, non-2xx responses, malformed output (including prose-wrapped arrays), and empty usable results fall back to bigrams. Empty or whitespace-only page content produces no sub-topics and makes no endpoint call, including content rejected as a challenge page. Kill mode skips extraction entirely.
+
 ## How compounding works
 
 - **Topics are durable keys.** A topic researched under any root, in any run, is never expanded again — cross-run dedup lives in SQLite (`UNIQUE(topic)`), not in memory.
