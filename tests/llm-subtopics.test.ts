@@ -88,6 +88,25 @@ test('a configured endpoint drives mitosis with LLM sub-topics', async t => {
   assert.ok(topics.includes('replay buffers'));
 });
 
+test('LLM topics are canonicalized and deduplicated in order before the limit', async t => {
+  const base = await llmServer(t, JSON.stringify([
+    ' MEMORY  consolidation ', 'memory consolidation', 'Memory\tConsolidation',
+    'Replay\nBuffers', 'replay buffers', 'episodic encoding', 'neural circuits',
+  ]), { expectedCalls: 1 });
+  const storePath = tempStorePath(t);
+  const run = await dive('topic distinct', {
+    storePath, maxNodes: 1, maxDepth: 0, llmBaseUrl: base, llmModel: 'test-model',
+  }, fakeWeb('plain page prose'));
+  const expected = ['memory consolidation', 'replay buffers', 'episodic encoding'];
+  assert.deepEqual(run.nodes[0].subTopics, expected);
+  const store = new Store(storePath);
+  try {
+    assert.deepEqual(store.getNodeByTopic('topic distinct')?.subtopics, expected);
+  } finally {
+    store.close();
+  }
+});
+
 const fallbackContent = 'evidence mapping '.repeat(8);
 const fallbackCases = [
   { name: 'non-2xx response', reply: '["memory consolidation"]', status: 503 },
@@ -99,6 +118,7 @@ const fallbackCases = [
   { name: 'trailing garbage', reply: '["memory consolidation"] trailing garbage' },
   { name: 'prose-wrapped array', reply: 'Here are topics: ["memory consolidation"]' },
   { name: 'all topics already researched', reply: '["memory consolidation"]', seed: true },
+  { name: 'double-spaced researched topic', reply: '["MEMORY  consolidation"]', seed: true },
   { name: 'timeout', reply: '["memory consolidation"]', hang: true },
 ];
 
