@@ -74,20 +74,21 @@ const CHROME_SELECTORS = 'script, style, nav, footer, header, aside, noscript, t
 
 const CANDIDATE_TAGS = 'article, main, section, div, td, body';
 
-/** Cloudflare / anti-bot interstitials are HTTP 200 HTML, not articles. */
-function isBrowserChallenge(title: string, content: string): boolean {
-  const t = title.trim().toLowerCase();
-  if (t === 'just a moment...' || t === 'just a moment') return true;
-  const c = content.toLowerCase();
-  return (
-    c.includes('checking your browser before accessing')
-    || c.includes('cf-browser-verification')
-    || c.includes('cdn-cgi/challenge-platform')
-  );
+function hasChallengeStructure(document: Document): boolean {
+  return Array.from(document.querySelectorAll('[id], [class]')).some(el =>
+    /challenge|cf-browser-verification|turnstile/i.test(`${el.id} ${el.getAttribute('class') ?? ''}`))
+    || Array.from(document.querySelectorAll('script[src], iframe[src]')).some(el => {
+      try {
+        const url = new URL(el.getAttribute('src') ?? '', 'https://example.invalid');
+        return url.hostname === 'challenges.cloudflare.com'
+          || /^\/cdn-cgi\/challenge-platform(?:\/|$)/.test(url.pathname);
+      } catch { return false; }
+    });
 }
 
 function rejectChallenge(ex: Extraction): Extraction {
-  if (!isBrowserChallenge(ex.title, ex.content)) return ex;
+  const title = ex.title.trim().toLowerCase();
+  if (ex.content.length >= 200 || (title !== 'just a moment...' && title !== 'just a moment')) return ex;
   return { title: ex.title, content: '', links: [], selector: null, usedRecipe: false, yieldChars: 0, fingerprint: null, method: 'generic' };
 }
 
@@ -268,7 +269,7 @@ export function extractGeneric(html: string): Extraction {
   // linkedom's .body getter throws when the document has no root element
   // (empty or fragment-only input) — bail out before touching it.
   const body = document.documentElement ? document.body : null;
-  if (!body || isHidden(body)) {
+  if (!body || isHidden(body) || hasChallengeStructure(document)) {
     return { title, content: '', links: [], selector: null, usedRecipe: false, yieldChars: 0, fingerprint: null, method: 'generic' };
   }
   // Harvest links from the full body BEFORE stripping chrome: nav/footer
@@ -308,8 +309,8 @@ export function extract(html: string, recipe: RecipeLike | null, config: Partial
   const take = (el: Element, selector: string, method: 'recipe' | 'adaptive'): Extraction | null => {
     const content = (el.textContent ?? '').replace(/\s+/g, ' ').trim();
     if (content.length < cfg.minRecipeYield) return null;
-    return rejectChallenge({ title: generic.title, content, links: collectLinks(el), selector,
-      usedRecipe: true, yieldChars: content.length, fingerprint: fingerprint(el), method });
+    return { title: generic.title, content, links: collectLinks(el), selector,
+      usedRecipe: true, yieldChars: content.length, fingerprint: fingerprint(el), method };
   };
   try {
     const matches = body.querySelectorAll(recipe.selector);

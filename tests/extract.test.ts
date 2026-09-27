@@ -187,4 +187,60 @@ describe('challenge rejection', () => {
   test('a normal page is not mistaken for a challenge', () => {
     assert.ok(extractGeneric(ARTICLE_PAGE).yieldChars > 0);
   });
+
+  const recipe = { selector: '#content', yieldChars: 1000, fallbackStreak: 0, wins: 3 };
+  for (const [name, structure] of [
+    ['verification container', '<div id="cf-browser-verification"></div>'],
+    ['challenge class', '<div class="challenge-running"></div>'],
+    ['challenge script', '<script src="/cdn-cgi/challenge-platform/h/b/orchestrate/jsch/v1"></script>'],
+    ['challenge iframe', '<iframe src="/cdn-cgi/challenge-platform"></iframe>'],
+    ['Turnstile script', '<script src="https://challenges.cloudflare.com/turnstile/v0/api.js"></script>'],
+    ['Turnstile iframe', '<iframe src="https://challenges.cloudflare.com/cdn-cgi/challenge-platform/widget"></iframe>'],
+    ['Turnstile widget', '<div class="cf-turnstile"></div>'],
+  ]) {
+    test(`neutral-title interstitial with ${name} is rejected in both paths`, () => {
+      const html = pageWith(`${structure}<main id="content"><p>${'Please verify your browser to continue. '.repeat(20)}</p><a href="/retry">Retry</a></main>`, 'Security verification');
+      for (const ex of [extractGeneric(html), extract(html, recipe)]) {
+        assert.deepEqual(ex, {
+          title: 'Security verification', content: '', links: [], selector: null,
+          usedRecipe: false, yieldChars: 0, fingerprint: null, method: 'generic',
+        });
+        const next = nextRecipe('target.example', null, {
+          usedRecipe: ex.usedRecipe, recipeYield: ex.yieldChars,
+          genericYield: ex.yieldChars, genericSelector: ex.selector, fingerprint: ex.fingerprint,
+        });
+        assert.equal(next.selector, null);
+        assert.equal(next.healed, false);
+      }
+    });
+  }
+
+  for (const title of ['Cloudflare explained', 'Just a moment', 'Just a moment...']) {
+    test(`article titled ${title} can quote challenge markers in both paths`, () => {
+      const content = 'Cloudflare says checking your browser before accessing and uses cf-browser-verification, cdn-cgi/challenge-platform, and turnstile. ' + PROSE;
+      const html = pageWith(`<article id="content"><p>${content}</p><a href="/source">Source</a></article>`, title);
+      const generic = extractGeneric(html);
+      const fromRecipe = extract(html, recipe);
+      for (const ex of [generic, fromRecipe]) {
+        assert.equal(ex.title, title);
+        assert.equal(ex.content, content + 'Source');
+        assert.deepEqual(ex.links, ['/source']);
+        assert.equal(ex.yieldChars, ex.content.length);
+        assert.ok(ex.fingerprint);
+      }
+      assert.equal(generic.selector, 'article#content');
+      assert.equal(fromRecipe.usedRecipe, true);
+      assert.equal(fromRecipe.selector, '#content');
+    });
+  }
+
+  test('known titles reject only short content without structural markers', () => {
+    for (const title of ['Just a moment', 'Just a moment...']) {
+      const html = pageWith('<main id="content">Please wait</main>', title);
+      assert.equal(extractGeneric(html).yieldChars, 0);
+      assert.equal(extract(html, recipe, { minRecipeYield: 1 }).yieldChars, 0);
+    }
+    const html = pageWith('<main>checking your browser before accessing</main>');
+    assert.equal(extractGeneric(html).content, 'checking your browser before accessing');
+  });
 });
